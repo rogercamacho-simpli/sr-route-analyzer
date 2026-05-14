@@ -35,21 +35,21 @@ st.markdown("""
     }
     [data-testid="stFileUploader"] section:hover { border-color: #6366f1 !important; }
     .main-header { font-size: 26px; font-weight: 700; margin-bottom: 0; }
-    .sub-header  { font-size: 14px; opacity: 0.6; margin-top: 4px; margin-bottom: 1.5rem; }
+    .sub-header  { font-size: 14px; margin-top: 4px; margin-bottom: 1.5rem; }
     .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
     .metric-card {
         background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
         border: 1px solid rgba(128,128,128,0.2); margin-bottom: 0;
     }
     .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; }
-    .metric-lbl { font-size: 12px; opacity: 0.6; margin-top: 4px; }
+    .metric-lbl { font-size: 12px; margin-top: 4px; }
     .rec-card {
         background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
         margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.2);
     }
     .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-    .rec-detail { font-size: 13px; opacity: 0.8; line-height: 1.55; }
-    .rec-field  { font-size: 11px; opacity: 0.55; margin-top: 8px; }
+    .rec-detail { font-size: 13px; line-height: 1.55; }
+    .rec-field  { font-size: 11px; margin-top: 8px; }
     .badge {
         display: inline-block; padding: 2px 10px; border-radius: 20px;
         font-size: 11px; font-weight: 600; margin-right: 6px;
