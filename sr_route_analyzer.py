@@ -34,22 +34,22 @@ st.markdown("""
         border-radius: 10px !important;
     }
     [data-testid="stFileUploader"] section:hover { border-color: #6366f1 !important; }
-    .main-header { font-size: 26px; font-weight: 700; margin-bottom: 0; }
-    .sub-header  { font-size: 14px; margin-top: 4px; margin-bottom: 1.5rem; }
-    .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
+    .main-header { font-size: 26px; font-weight: 700; margin-bottom: 0; color: inherit; }
+    .sub-header  { font-size: 14px; margin-top: 4px; margin-bottom: 1.5rem; color: inherit; }
+    .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: inherit; }
     .metric-card {
         background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
         border: 1px solid rgba(128,128,128,0.2); margin-bottom: 0;
     }
-    .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; }
-    .metric-lbl { font-size: 12px; margin-top: 4px; }
+    .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; color: inherit; }
+    .metric-lbl { font-size: 12px; margin-top: 4px; color: inherit; }
     .rec-card {
         background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
         margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.2);
     }
-    .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-    .rec-detail { font-size: 13px; line-height: 1.55; }
-    .rec-field  { font-size: 11px; margin-top: 8px; }
+    .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: inherit; }
+    .rec-detail { font-size: 13px; line-height: 1.55; color: inherit; }
+    .rec-field  { font-size: 11px; margin-top: 8px; color: inherit; }
     .badge {
         display: inline-block; padding: 2px 10px; border-radius: 20px;
         font-size: 11px; font-weight: 600; margin-right: 6px;
@@ -60,7 +60,7 @@ st.markdown("""
     .badge-blue  { background: rgba(59,130,246,0.12); color: #60a5fa; }
     .badge-gray  { background: rgba(107,114,128,0.12);color: #9ca3af; }
     .badge-green { background: rgba(22,163,74,0.12);  color: #4ade80; }
-    .section-title { font-size: 16px; font-weight: 600; margin: 1.5rem 0 .75rem; }
+    .section-title { font-size: 16px; font-weight: 600; margin: 1.5rem 0 .75rem; color: inherit; }
     .error-banner {
         background: rgba(220,38,38,0.1); border: 1.5px solid rgba(220,38,38,0.4);
         border-radius: 12px; padding: 20px 24px; margin-bottom: 1.5rem;
