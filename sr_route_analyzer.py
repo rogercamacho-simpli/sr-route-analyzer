@@ -1821,26 +1821,6 @@ def main():
         })
     st.dataframe(pd.DataFrame(zone_rows), use_container_width=True, hide_index=True)
 
-    if findings["raw_issue_counts"]:
-        st.markdown('<div class="section-title">🔍 Distribución de causas</div>', unsafe_allow_html=True)
-        ic = findings["raw_issue_counts"]
-        labels_map = {k: v[1] for k, v in ISSUE_LABELS.items()}
-        labels = [labels_map.get(k, k) for k in ic.keys()]
-        counts = list(ic.values())
-        colors = ["#ef4444","#f59e0b","#3b82f6","#6b7280","#16a34a",
-                  "#8b5cf6","#06b6d4","#ec4899","#84cc16","#f97316"]
-        fig2 = go.Figure(go.Bar(
-            x=counts, y=labels, orientation="h",
-            marker_color=colors[:len(labels)],
-            text=counts, textposition="outside",
-        ))
-        fig2.update_layout(
-            plot_bgcolor="white", paper_bgcolor="white",
-            height=max(200, len(labels) * 40 + 60),
-            margin=dict(t=10, b=40, l=20, r=60),
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
     st.markdown('<div class="section-title">📋 Tabla de nodos sin atender</div>', unsafe_allow_html=True)
     with st.expander("Ver tabla completa", expanded=False):
         rows = []
