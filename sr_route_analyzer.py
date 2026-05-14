@@ -1056,12 +1056,8 @@ def analyze(req: dict, res: dict) -> dict:
                     "type": "nodes_no_zone", "severity": "medium",
                     "field": "zones (nodo)",
                     "value": "zones=[]",
-                    "detail": (
-                        "Este nodo no tiene zona asignada pero todos los vehículos tienen zona. "
-                        "Con autoZone=false, el router atiende primero los nodos de la zona del vehículo "
-                        "y solo incluye los nodos sin zona si sobra capacidad y tiempo."
-                    ),
-                    "fix": "Asignar la zona correcta al nodo, o agregar un vehículo con zones=[] para que los cubra.",
+                    "detail": "Nodo sin zona — ver detalle en Validación pre-vuelo.",
+                    "fix": "Asignar la zona correcta al nodo, o agregar un vehículo con zones=[].",
                 })
 
         # 10. max_visit — vehículos llenos (sin otra causa detectada)
@@ -1262,12 +1258,6 @@ def analyze(req: dict, res: dict) -> dict:
          "window_start es posterior a window_end. El router rechaza estas ventanas.",
          2, "#f59e0b", "window_start / window_end"),
 
-        ("nodes_no_zone",
-         "Asignar zona a nodos sin zona o agregar vehículo sin restricción de zona",
-         "Estos nodos tienen zones=[] pero todos los vehículos tienen zona asignada. "
-         "Con autoZone=false el router los atiende solo si sobra capacidad tras cubrir su zona.",
-         2, "#f59e0b", "zones (nodo)"),
-
         ("zone_mismatch",
          "Asignar vehículos a las zonas sin cobertura",
          "Estos nodos tienen una zona asignada pero ningún vehículo cubre esa zona. "
@@ -1299,9 +1289,13 @@ def analyze(req: dict, res: dict) -> dict:
          4, "#6b7280", "múltiples campos"),
     ]
 
+    # Tipos cubiertos por el pre-vuelo — no repetir en recomendaciones
+    # El pre-vuelo ya muestra detalle + lista de nodos afectados
+    COVERED_BY_PREFLIGHT = {"nodes_no_zone"}
+
     for issue_type, title, detail, priority, color, field in issue_recs:
         cnt = issue_counts.get(issue_type, 0)
-        if cnt > 0:
+        if cnt > 0 and issue_type not in COVERED_BY_PREFLIGHT:
             recs.append({
                 "priority": priority, "color": color,
                 "title":    title,
