@@ -833,8 +833,7 @@ def main():
     # ── filteredClientsNodes ───────────────────────────────────────────────────
     if filtered:
         st.markdown(
-            f'<div class="section-title">🚫 Nodos filtrados antes de optimizar '
-            f'({len(filtered)})</div>',
+            f'<div class="section-title">🚫 Nodos filtrados antes de optimizar ({len(filtered)})</div>',
             unsafe_allow_html=True,
         )
         st.caption(
@@ -844,39 +843,68 @@ def main():
 
         filtered_analysis = analyze_filtered_nodes(req, res)
 
-        # Tabla resumen
+        # ── Métricas resumen ──────────────────────────────────────────────────
+        geo_issues   = [fn for fn in filtered_analysis if fn["geo_issue"]]
+        codes_all    = [c for fn in filtered_analysis for c in fn["codes"]]
+        code_counts  = Counter(codes_all)
+        dists        = [fn["dist_km"] for fn in filtered_analysis if fn["dist_km"]]
+        avg_dist     = round(sum(dists) / len(dists), 1) if dists else None
+
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1: render_metric("Total filtrados",       len(filtered),        "#dc2626")
+        with mc2: render_metric("Con problema geo",      len(geo_issues),      "#f59e0b" if geo_issues else "#16a34a")
+        with mc3: render_metric("Dist. promedio (km)",   avg_dist or "—")
+        with mc4: render_metric("Código más frecuente",  code_counts.most_common(1)[0][0] if code_counts else "—")
+
+        # Recomendación si todos tienen problema geo
+        if len(geo_issues) == len(filtered_analysis):
+            st.error(
+                "🗺️ **Todos los nodos tienen incompatibilidad geográfica.** "
+                "El vehículo parte de una ubicación demasiado lejana para alcanzar los nodos "
+                "dentro del turno disponible. Verificar que el punto de inicio del vehículo "
+                "corresponda a la misma ciudad/región que las visitas."
+            )
+        elif geo_issues:
+            st.warning(
+                f"🗺️ {len(geo_issues)} de {len(filtered_analysis)} nodos tienen "
+                f"incompatibilidad geográfica con el vehículo asignado."
+            )
+
+        # ── Tabla filtrable ───────────────────────────────────────────────────
+        st.markdown('<div style="margin-top:1rem"></div>', unsafe_allow_html=True)
         rows = []
         for fn in filtered_analysis:
             rows.append({
-                "Ident":       fn["ident"],
-                "Dirección":   fn["address"],
-                "Código":      ", ".join(fn["codes"]),
-                "Dist. veh (km)": fn["dist_km"] if fn["dist_km"] else "—",
-                "Problema geo": "🔴 Sí" if fn["geo_issue"] else "🟢 No",
-                "Load 1/2/3":  f"{fn['load']:.0f} / {fn['load_2']:.0f} / {fn['load_3']:.0f}",
+                "Ident":          fn["ident"],
+                "Dirección":      fn["address"],
+                "Código":         ", ".join(fn["codes"]),
+                "Vehículo ref.":  fn["nearest_v"] or "—",
+                "Dist. veh (km)": fn["dist_km"] if fn["dist_km"] else None,
+                "Problema geo":   "Sí" if fn["geo_issue"] else "No",
+                "Diagnóstico":    fn["geo_detail"] if fn["geo_detail"] else (
+                    "W00001: revisar coordenadas o configuración del país"
+                    if "W00001" in fn["codes"] else "—"
+                ),
+                "Load 1":         fn["load"],
+                "Load 2":         fn["load_2"],
+                "Load 3":         fn["load_3"],
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        # Detalle por nodo
-        for fn in filtered_analysis:
-            code_str = ", ".join(fn["codes"])
-            icon = "🔴" if fn["geo_issue"] else "🟡"
-            with st.expander(f"{icon} **{fn['ident']}** — {fn['address'][:55]}", expanded=fn["geo_issue"]):
-                st.markdown(f"**Código(s):** `{code_str}`")
-                if fn["dist_km"]:
-                    st.markdown(f"**Distancia al vehículo {fn['nearest_v']}:** {fn['dist_km']} km")
-                if fn["geo_issue"]:
-                    st.error(f"🗺️ Incompatibilidad geográfica: {fn['geo_detail']}")
-                    st.markdown(
-                        "**Fix:** Verificar que el punto de inicio del vehículo corresponda "
-                        "a la misma ciudad/región que los nodos, o asignar un vehículo local."
-                    )
-                elif fn["codes"] == ["W00001"]:
-                    st.warning(
-                        "Código W00001 sin incompatibilidad geográfica detectada. "
-                        "Posibles causas: coordenadas fuera del país configurado, "
-                        "zona de exclusión, o nodo con datos inválidos."
-                    )
+        df_filtered = pd.DataFrame(rows)
+        st.dataframe(df_filtered, use_container_width=True, hide_index=True)
+
+        # ── Descarga Excel ────────────────────────────────────────────────────
+        import io
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_filtered.to_excel(writer, index=False, sheet_name="Nodos Filtrados")
+        buffer.seek(0)
+        st.download_button(
+            label="📥 Descargar detalle en Excel",
+            data=buffer,
+            file_name="nodos_filtrados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     if not unattended and not filtered:
         st.success("✅ No hay nodos sin atender ni filtrados en este response.")
