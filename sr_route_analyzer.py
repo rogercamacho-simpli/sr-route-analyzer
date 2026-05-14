@@ -239,8 +239,9 @@ ISSUE_LABELS = {
     "zero_window":           ("⛔", "Ventana de 0 min",          "badge-red"),
     "inverted_window":       ("🔄", "Ventana invertida",         "badge-red"),
     "capacity_overflow":     ("⚖️", "Capacidad excedida",       "badge-amber"),
-    "zone_mismatch":         ("🗺️", "Zona sin vehículo",        "badge-amber"),
-    "skills_mismatch":       ("🔧", "Skills faltantes",         "badge-amber"),
+    "zone_mismatch":             ("🗺️", "Zona sin vehículo",              "badge-amber"),
+    "inactive_vehicles_no_zone": ("🚛", "Vehículos inactivos sin zona",   "badge-red"),
+    "skills_mismatch":           ("🔧", "Skills faltantes",               "badge-amber"),
     "nodes_no_zone":         ("🗺️", "Nodos sin zona",           "badge-amber"),
     "max_visit_limit":       ("🔢", "Límite max_visit",                      "badge-amber"),
     "tight_window":          ("⏳", "Ventana = duración",                    "badge-red"),
@@ -1101,6 +1102,26 @@ def analyze(req: dict, res: dict) -> dict:
                 "fix":    "Asignar la zona a un vehículo disponible",
             })
 
+        # 7b. Nodo con zona, pero vehículos candidatos al límite Y hay vehículos inactivos sin zona
+        if not issues and node_zones and not req.get("autoZone", False):
+            all_veh_zones_local = set()
+            for v in vehicles.values():
+                all_veh_zones_local.update(v.get("zones", []))
+            # Hay vehículos sin zona que podrían cubrir el nodo si tuvieran zona
+            if vehicles_no_zone and all_veh_zones_local:
+                issues.append({
+                    "type": "inactive_vehicles_no_zone", "severity": "high",
+                    "field": "zones (vehículo)",
+                    "value": f"{len(vehicles_no_zone)} vehículo(s) sin zona",
+                    "detail": (
+                        f"Este nodo tiene zona asignada {node_zones} pero hay "
+                        f"{len(vehicles_no_zone)} vehículo(s) con zones=[] que no pueden atenderlo. "
+                        f"Con autoZone=false, esos vehículos quedan completamente inactivos. "
+                        f"Ver detalle en Validación pre-vuelo."
+                    ),
+                    "fix": f"Asignar la(s) zona(s) {node_zones} a los vehículos inactivos.",
+                })
+
         # 8. Skills
         if node_skills:
             all_skills = set()
@@ -1343,6 +1364,13 @@ def analyze(req: dict, res: dict) -> dict:
          "Corregir ventanas horarias invertidas (E01006)",
          "window_start es posterior a window_end. El router rechaza estas ventanas.",
          2, "#f59e0b", "window_start / window_end"),
+
+        ("inactive_vehicles_no_zone",
+         "Asignar zonas a los vehículos inactivos",
+         "Hay vehículos con zones=[] que no pueden atender ningún nodo porque todos los nodos "
+         "tienen zona asignada y autoZone=false. Estos vehículos están completamente inactivos. "
+         "Asignarles las zonas correspondientes los activaría inmediatamente.",
+         1, "#ef4444", "zones (vehículo)"),
 
         ("zone_mismatch",
          "Asignar vehículos a las zonas sin cobertura",
