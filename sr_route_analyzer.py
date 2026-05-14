@@ -1295,16 +1295,23 @@ def analyze(req: dict, res: dict) -> dict:
 
         ("capacity_time_general",
          "Revisar configuración de nodos sin causa específica detectada",
-         "No se identificó un problema concreto. Puede ser consecuencia de una combinación de restricciones globales. Revisar carga, duración y ventanas.",
+         "No se identificó un problema concreto. Puede ser consecuencia de una combinación "
+         "de restricciones globales. Revisar carga, duración y ventanas.",
          4, "#6b7280", "múltiples campos"),
     ]
 
+    # Tipos cubiertos por el pre-vuelo — no repetir en recomendaciones
     COVERED_BY_PREFLIGHT = {"nodes_no_zone"}
 
     for issue_type, title, detail, priority, color, field in issue_recs:
         cnt = issue_counts.get(issue_type, 0)
         if cnt > 0 and issue_type not in COVERED_BY_PREFLIGHT:
-            recs.append({"priority": priority, "color": color, "title": title, "detail": f"{cnt} nodo(s) afectado(s). {detail}", "field": field, "affected": cnt})
+            recs.append({
+                "priority": priority, "color": color,
+                "title":    title,
+                "detail":   f"{cnt} nodo(s) afectado(s). {detail}",
+                "field":    field, "affected": cnt,
+            })
 
     # Recomendación clustering — dinámica según beauty
     cnt_clustering = issue_counts.get("clustering_preference", 0)
@@ -1332,26 +1339,6 @@ def analyze(req: dict, res: dict) -> dict:
                     "Considera agregar un vehículo adicional o revisar la distribución geográfica."
                 ),
                 "field": "optimización global", "affected": cnt_clustering,
-            })
-
-        ("capacity_time_general",
-         "Revisar configuración de nodos sin causa específica detectada",
-         "No se identificó un problema concreto. Puede ser consecuencia de una combinación "
-         "de restricciones globales. Revisar carga, duración y ventanas.",
-         4, "#6b7280", "múltiples campos"),
-
-    # Tipos cubiertos por el pre-vuelo — no repetir en recomendaciones
-    # El pre-vuelo ya muestra detalle + lista de nodos afectados
-    COVERED_BY_PREFLIGHT = {"nodes_no_zone"}
-
-    for issue_type, title, detail, priority, color, field in issue_recs:
-        cnt = issue_counts.get(issue_type, 0)
-        if cnt > 0 and issue_type not in COVERED_BY_PREFLIGHT:
-            recs.append({
-                "priority": priority, "color": color,
-                "title":    title,
-                "detail":   f"{cnt} nodo(s) afectado(s). {detail}",
-                "field":    field, "affected": cnt,
             })
 
     recs.sort(key=lambda r: r["priority"])
