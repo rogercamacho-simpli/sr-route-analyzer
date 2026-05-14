@@ -228,6 +228,7 @@ ISSUE_LABELS = {
     "capacity_overflow":     ("⚖️", "Capacidad excedida",       "badge-amber"),
     "zone_mismatch":         ("🗺️", "Zona sin vehículo",        "badge-amber"),
     "skills_mismatch":       ("🔧", "Skills faltantes",         "badge-amber"),
+    "nodes_no_zone":         ("🗺️", "Nodos sin zona",           "badge-amber"),
     "max_visit_limit":       ("🔢", "Límite max_visit",                      "badge-amber"),
     "tight_window":          ("⏳", "Ventana = duración",                    "badge-red"),
     "exc_so_001":            ("🕐", "Excluido por ventana",                  "badge-red"),
@@ -402,6 +403,27 @@ def validate_request(req: dict) -> list:
                 ),
                 "fix": "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true.",
                 "nodes": [],
+            })
+
+        # Nodos sin zona con vehículos que SÍ tienen zona asignada
+        nodes_no_zone    = [n for n in nodes if not n.get("zones")]
+        vehicles_no_zone_req = [v for v in vehicles if not v.get("zones")]
+        if nodes_no_zone and all_veh_zones and not vehicles_no_zone_req:
+            issues.append({
+                "code": "NODES_NO_ZONE", "severity": "high",
+                "field": "zones (nodo)",
+                "value": f"{len(nodes_no_zone)} nodo(s) sin zona",
+                "title": f"{len(nodes_no_zone)} nodo(s) sin zona en un request donde todos los vehículos tienen zona asignada",
+                "detail": (
+                    f"{len(nodes_no_zone)} nodo(s) tienen zones=[] pero todos los vehículos tienen zona asignada. "
+                    f"Con autoZone=false, el router atiende primero los nodos de la zona del vehículo y solo "
+                    f"incluye los nodos sin zona si sobra capacidad y tiempo. Es probable que queden sin atender."
+                ),
+                "fix": (
+                    "Asignar la zona correcta a los nodos sin zona, "
+                    "o agregar un vehículo sin zona asignada (zones=[]) para que los cubra."
+                ),
+                "nodes": [{"ident": n.get("ident",""), "address": n.get("address","")[:55]} for n in nodes_no_zone[:15]],
             })
 
     # E03003 — Skills requeridas sin cobertura en vehículos
