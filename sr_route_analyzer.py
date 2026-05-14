@@ -176,7 +176,45 @@ def parse_upload(file) -> dict:
 
 
 def is_error_response(res):
-    return "errors" in res and "vehicles" not in res
+    # Formato E500: {"errors": [...]}
+    if "errors" in res and "vehicles" not in res:
+        return True
+    # Formato E03XXX/E01XXX/E02XXX/E99XXX: {"description": "...", "cause": {"code": "..."}}
+    if "description" in res and "cause" in res and "vehicles" not in res:
+        return True
+    return False
+
+# Mensajes legibles por código de error de la documentación
+ERROR_CODE_MESSAGES = {
+    "E03001": ("Carga total de nodos insuficiente",
+               "La suma de carga de todos los nodos es menor que la carga mínima × capacidad de los vehículos. "
+               "El router no genera rutas porque no hay suficiente carga para justificarlas.",
+               "Revisar el campo min_load de los vehículos o agregar más nodos."),
+    "E03002": ("Carga de nodos excede la capacidad de todos los vehículos",
+               "Hay nodos cuya carga individual supera la capacidad de cualquier vehículo disponible. "
+               "Ningún vehículo puede atenderlos.",
+               "Aumentar la capacidad de los vehículos o dividir la carga de los nodos."),
+    "E03003": ("Ningún vehículo tiene las skills requeridas por los nodos",
+               "Todos los nodos piden skills específicas y ningún vehículo las tiene asignadas. "
+               "El router no puede generar ninguna ruta.",
+               "Asignar las skills requeridas a al menos un vehículo."),
+    "E03004": ("Ningún vehículo cubre las zonas asignadas a los nodos",
+               "Todos los nodos tienen zona asignada pero ningún vehículo cubre esas zonas. "
+               "El router no puede generar ninguna ruta (aplica cuando autoZone=false).",
+               "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true."),
+    "E03005": ("Ningún vehículo tiene turno compatible con las ventanas de los nodos",
+               "Para todas las visitas, no existe un vehículo con horario disponible.",
+               "Revisar que los turnos de los vehículos (shift_start/shift_end) se solapen con las ventanas de los nodos."),
+    "E03006": ("Ningún vehículo tiene turno compatible (longRoutes=true)",
+               "Para todas las visitas, no existe un vehículo con horario disponible en formato de horas extendidas.",
+               "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos."),
+    "E99001": ("Visita con más de una zona asignada",
+               "Una o más visitas tienen más de una zona asignada. Solo se permite una zona por visita.",
+               "Corregir el campo zones de los nodos para que tenga máximo un valor."),
+    "E99002": ("Features de optimización incompatibles",
+               "Se están usando dos o más configuraciones que no son compatibles entre sí.",
+               "Revisar la combinación de parámetros de optimización en el request."),
+}
 
 VALID_FMV = {1.0, 1.5, 2.0, 3.0}
 
@@ -320,6 +358,134 @@ def validate_request(req: dict) -> list:
                 "detail": f"shift_start ({v.get('shift_start')}) ≥ shift_end ({v.get('shift_end')}).",
                 "fix": "Corregir shift_start y shift_end del vehículo",
                 "nodes": [],
+            })
+
+    # ── Checks de compatibilidad global (E03XXX) ──────────────────────────────
+    nodes    = req.get("nodes",    [])
+    vehicles = req.get("vehicles", [])
+
+    # E03004 — Zonas de nodos sin cobertura en vehículos
+    if not req.get("autoZone", False):
+        all_veh_zones = set()
+        for v in vehicles:
+            all_veh_zones.update(v.get("zones", []))
+        nodes_with_zone = [n for n in nodes if n.get("zones")]
+        if nodes_with_zone and all_veh_zones:
+            uncovered_zones = set()
+            for n in nodes_with_zone:
+                for z in n.get("zones", []):
+                    if z not in all_veh_zones:
+                        uncovered_zones.add(z)
+            if uncovered_zones:
+                count = sum(1 for n in nodes_with_zone if any(z in uncovered_zones for z in n.get("zones", [])))
+                issues.append({
+                    "code": "E03004", "severity": "critical",
+                    "field": "zones",
+                    "value": str(sorted(uncovered_zones)),
+                    "title": f"Zona(s) sin cobertura — ningún vehículo cubre {sorted(uncovered_zones)}",
+                    "detail": (
+                        f"{count} nodo(s) tienen asignada(s) la(s) zona(s) {sorted(uncovered_zones)} "
+                        f"pero ningún vehículo cubre esas zonas. El router no generará ninguna ruta (E03004)."
+                    ),
+                    "fix": "Asignar las zonas a al menos un vehículo, o activar autoZone=true.",
+                    "nodes": [],
+                })
+        elif nodes_with_zone and not all_veh_zones:
+            issues.append({
+                "code": "E03004", "severity": "critical",
+                "field": "zones",
+                "value": f"{len(nodes_with_zone)} nodo(s) con zona",
+                "title": "Todos los nodos tienen zona pero ningún vehículo tiene zona asignada",
+                "detail": (
+                    f"{len(nodes_with_zone)} nodo(s) tienen zona asignada pero los {len(vehicles)} "
+                    f"vehículo(s) tienen zones=[] . El router no generará ninguna ruta (E03004)."
+                ),
+                "fix": "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true.",
+                "nodes": [],
+            })
+
+    # E03003 — Skills requeridas sin cobertura en vehículos
+    all_veh_skills = set()
+    for v in vehicles:
+        all_veh_skills.update(v.get("skills", []))
+    nodes_with_skills = [n for n in nodes if n.get("skills_required") or n.get("skills_optional")]
+    if nodes_with_skills:
+        missing_skills = set()
+        for n in nodes_with_skills:
+            for s in (n.get("skills_required", []) + n.get("skills_optional", [])):
+                if s not in all_veh_skills:
+                    missing_skills.add(s)
+        if missing_skills and len(missing_skills) == len({s for n in nodes_with_skills for s in (n.get("skills_required",[]) + n.get("skills_optional",[]))}):
+            issues.append({
+                "code": "E03003", "severity": "critical",
+                "field": "skills_required / skills_optional",
+                "value": str(sorted(missing_skills)),
+                "title": f"Ningún vehículo tiene las skills requeridas por los nodos",
+                "detail": (
+                    f"Las skills {sorted(missing_skills)} son requeridas por los nodos pero "
+                    f"ningún vehículo las tiene asignadas. El router no generará ninguna ruta (E03003)."
+                ),
+                "fix": "Asignar las skills faltantes a al menos un vehículo.",
+                "nodes": [],
+            })
+
+    # E03002 — Carga individual mayor que capacidad de todos los vehículos
+    max_cap1 = max((v.get("capacity",   0) or 0 for v in vehicles), default=0)
+    max_cap2 = max((v.get("capacity_2", 0) or 0 for v in vehicles), default=0)
+    max_cap3 = max((v.get("capacity_3", 0) or 0 for v in vehicles), default=0)
+    if max_cap1 < 1e15:  # ignorar capacidad ilimitada
+        overload_nodes = []
+        for n in nodes:
+            l1 = n.get("load",   0) or 0
+            l2 = n.get("load_2", 0) or 0
+            l3 = n.get("load_3", 0) or 0
+            if (max_cap1 > 0 and l1 > max_cap1) or \
+               (max_cap2 > 0 and l2 > max_cap2) or \
+               (max_cap3 > 0 and l3 > max_cap3):
+                overload_nodes.append(n.get("ident", "?"))
+        if overload_nodes:
+            issues.append({
+                "code": "E03002", "severity": "critical",
+                "field": "load / capacity",
+                "value": f"{len(overload_nodes)} nodo(s)",
+                "title": f"Carga de nodos excede la capacidad máxima de todos los vehículos ({len(overload_nodes)} nodo(s))",
+                "detail": (
+                    f"{len(overload_nodes)} nodo(s) tienen una carga que supera la capacidad del vehículo "
+                    f"más grande disponible. El router no puede asignarlos a ningún vehículo (E03002)."
+                ),
+                "fix": "Aumentar la capacidad de los vehículos o dividir la carga de los nodos.",
+                "nodes": overload_nodes[:15],
+            })
+
+    # E03005/E03006 — Ventanas de nodos sin solapamiento con ningún turno de vehículo
+    if not req.get("longRoutes", False):
+        shifts = [(parse_time(v.get("shift_start","00:01")), parse_time(v.get("shift_end","23:59"))) for v in vehicles]
+        shifts = [(s,e) for s,e in shifts if s is not None and e is not None]
+        no_overlap_nodes = []
+        for n in nodes:
+            ws = parse_time(n.get("window_start", "00:00"))
+            we = parse_time(n.get("window_end",   "23:59"))
+            if ws is None or we is None:
+                continue
+            has_overlap = any(ws <= se and ss <= we for ss, se in shifts)
+            if not has_overlap:
+                no_overlap_nodes.append({
+                    "ident":   n.get("ident", "?"),
+                    "address": n.get("address", "")[:55],
+                    "window":  f"{n.get('window_start')}–{n.get('window_end')}",
+                })
+        if no_overlap_nodes and len(no_overlap_nodes) == len(nodes):
+            issues.append({
+                "code": "E03005", "severity": "critical",
+                "field": "window_start / window_end vs shift",
+                "value": f"{len(no_overlap_nodes)} nodo(s)",
+                "title": "Ningún vehículo tiene turno compatible con las ventanas de los nodos",
+                "detail": (
+                    f"Las ventanas de tiempo de todos los nodos están fuera del turno de todos los vehículos. "
+                    f"El router no generará ninguna ruta (E03005)."
+                ),
+                "fix": "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos.",
+                "nodes": no_overlap_nodes[:15],
             })
 
     return issues
@@ -1240,13 +1406,37 @@ def main():
 
     # ── RESPONSE DE ERROR ─────────────────────────────────────────────────────
     if is_error_response(res):
-        for err in res.get("errors", []):
+        # Determinar código y mensaje según el formato del response
+        err_code = ""
+        err_desc = ""
+
+        if "errors" in res:
+            # Formato E500: {"errors": [...]}
+            for err in res.get("errors", []):
+                err_code = err.get("code", "") or err.get("metadata", {}).get("code", "")
+                err_desc = err.get("message", "")
+        elif "cause" in res:
+            # Formato E03XXX / E01XXX: {"description": "...", "cause": {"code": "..."}}
+            err_code = res.get("cause", {}).get("code", "")
+            err_desc = res.get("description", "")
+
+        # Buscar mensaje amigable en el diccionario
+        friendly = ERROR_CODE_MESSAGES.get(err_code)
+        if friendly:
+            title, detail, fix = friendly
             st.markdown(f"""
             <div class="error-banner">
-                <div class="error-title">⛔ Error del Router — {err.get('code','')}</div>
-                <div style="font-size:14px;color:#7f1d1d;margin-top:4px;">{err.get('message','')}</div>
-                <div style="font-size:12px;color:#991b1b;margin-top:6px;">metadata: {err.get('metadata',{})}</div>
+                <div class="error-title">⛔ {err_code} — {title}</div>
+                <div style="font-size:14px;color:#7f1d1d;margin-top:6px;">{detail}</div>
+                <div style="font-size:12px;color:#991b1b;margin-top:8px;">✏️ {fix}</div>
             </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="error-banner">
+                <div class="error-title">⛔ Error del Router — {err_code}</div>
+                <div style="font-size:14px;color:#7f1d1d;margin-top:4px;">{err_desc}</div>
+            </div>""", unsafe_allow_html=True)
+
         st.warning(
             "El router no produjo rutas. Revisa los problemas detectados en la "
             "validación pre-vuelo — uno o más de ellos es la causa probable del error."
