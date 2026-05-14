@@ -1078,14 +1078,14 @@ def analyze(req: dict, res: dict) -> dict:
         if not issues and vehicle_last_state:
             node_lat = req_node.get("lat")
             node_lon = req_node.get("lon")
+            node_service = node_dur or 0
             if node_lat and node_lon:
-                # Find nearest active vehicle's last state
                 best_veh = None
                 best_rem = None
                 best_travel = None
                 for vid, vs in vehicle_last_state.items():
                     dist_km    = haversine_km(vs["lat"], vs["lon"], node_lat, node_lon)
-                    travel_min = (dist_km / 60) * 60  # ~60 km/h
+                    travel_min = (dist_km / 60) * 60  # 60 km/h
                     if best_veh is None or dist_km < haversine_km(
                         vehicle_last_state[best_veh]["lat"],
                         vehicle_last_state[best_veh]["lon"],
@@ -1095,37 +1095,54 @@ def analyze(req: dict, res: dict) -> dict:
                         best_rem    = vs["remaining"]
                         best_travel = travel_min
 
-                if best_rem is not None and best_travel is not None and best_travel > best_rem * 0.8:
-                    dep_h  = int(vehicle_last_state[best_veh]["dep_min"] // 60)
-                    dep_m  = int(vehicle_last_state[best_veh]["dep_min"] % 60)
-                    end_h  = int(vehicle_last_state[best_veh]["shift_end"] // 60)
-                    end_m  = int(vehicle_last_state[best_veh]["shift_end"] % 60)
-                    issues.append({
-                        "type": "shift_time_exhausted", "severity": "high",
-                        "field": "shift_end",
-                        "value": f"~{best_travel:.0f} min traslado, {best_rem:.0f} min restantes",
-                        "detail": (
-                            f"El vehículo más cercano completó su última visita a las "
-                            f"{dep_h:02d}:{dep_m:02d} y su turno termina a las {end_h:02d}:{end_m:02d} "
-                            f"({best_rem:.0f} min restantes). "
-                            f"Llegar a este nodo toma ~{best_travel:.0f} min — "
-                            f"insuficiente para alcanzarlo a tiempo."
-                        ),
-                        "fix": "Ampliar el turno del vehículo o asignar un vehículo adicional a este sector.",
-                    })
+                # Dispara cuando: traslado + servicio > tiempo restante
+                if best_rem is not None and best_travel is not None:
+                    time_needed = best_travel + node_service
+                    if time_needed > best_rem:
+                        dep_h = int(vehicle_last_state[best_veh]["dep_min"] // 60)
+                        dep_m = int(vehicle_last_state[best_veh]["dep_min"] % 60)
+                        end_h = int(vehicle_last_state[best_veh]["shift_end"] // 60)
+                        end_m = int(vehicle_last_state[best_veh]["shift_end"] % 60)
+                        issues.append({
+                            "type": "shift_time_exhausted", "severity": "high",
+                            "field": "shift_end",
+                            "value": f"~{best_travel:.0f} min traslado + {node_service} min servicio = {time_needed:.0f} min > {best_rem:.0f} min restantes",
+                            "detail": (
+                                f"El vehículo más cercano completó su última visita a las "
+                                f"{dep_h:02d}:{dep_m:02d} y su turno termina a las {end_h:02d}:{end_m:02d} "
+                                f"({best_rem:.0f} min restantes). "
+                                f"Llegar a este nodo toma ~{best_travel:.0f} min de traslado + "
+                                f"{node_service} min de servicio = {time_needed:.0f} min en total — "
+                                f"insuficiente para alcanzarlo a tiempo."
+                            ),
+                            "fix": "Ampliar el turno del vehículo o asignar un vehículo adicional a este sector.",
+                        })
 
         # Fallback genérico
         if not issues:
             if cause_code == "EXC_SO-002":
-                issues.append({
-                    "type": "clustering_preference", "severity": "low",
-                    "field": "beauty", "value": cause_code,
-                    "detail": (
-                        "El optimizador excluyó este nodo para producir rutas más agrupadas "
-                        "y con menos cruces. Tiene tiempo y capacidad disponibles."
-                    ),
-                    "fix": "Probar con beauty=false para priorizar atender todos los nodos",
-                })
+                beauty_on = req.get("beauty", True)
+                if beauty_on:
+                    issues.append({
+                        "type": "clustering_preference", "severity": "low",
+                        "field": "beauty", "value": cause_code,
+                        "detail": (
+                            "El optimizador excluyó este nodo para producir rutas más agrupadas "
+                            "y con menos cruces (beauty=true activo). Tiene tiempo y capacidad disponibles."
+                        ),
+                        "fix": "Probar con beauty=false para priorizar atender todos los nodos sobre la agrupación.",
+                    })
+                else:
+                    issues.append({
+                        "type": "clustering_preference", "severity": "medium",
+                        "field": "optimización global", "value": cause_code,
+                        "detail": (
+                            "El optimizador excluyó este nodo para mejorar la calidad global de las rutas "
+                            "(beauty=false, pero el algoritmo aplicó exclusión por optimización interna). "
+                            "El nodo tiene tiempo y capacidad disponibles pero incluirlo empeoraría otras rutas."
+                        ),
+                        "fix": "Considerar agregar un vehículo adicional o revisar la distribución geográfica de los nodos.",
+                    })
             elif cause_code == "EXC_SO-001":
                 issues.append({
                     "type": "exc_so_001", "severity": "high",
@@ -1276,11 +1293,33 @@ def analyze(req: dict, res: dict) -> dict:
          "El router no puede asignarlos a ningún vehículo.",
          3, "#3b82f6", "skills (vehículo)"),
 
-        ("clustering_preference",
-         "Evaluar desactivar el parámetro beauty",
-         "El optimizador los excluyó para minimizar cruces y producir rutas más agrupadas. "
-         "Tienen tiempo y capacidad disponibles — con beauty=false serían incluidos.",
-         4, "#6b7280", "beauty"),
+    # Recomendación clustering — dinámica según beauty
+    cnt_clustering = issue_counts.get("clustering_preference", 0)
+    if cnt_clustering > 0:
+        beauty_on = req.get("beauty", True)
+        if beauty_on:
+            recs.append({
+                "priority": 4, "color": "#6b7280",
+                "title":    "Evaluar desactivar el parámetro beauty",
+                "detail":   (
+                    f"{cnt_clustering} nodo(s) afectado(s). "
+                    "El optimizador los excluyó para minimizar cruces y producir rutas más agrupadas (beauty=true). "
+                    "Tienen tiempo y capacidad disponibles — con beauty=false serían incluidos."
+                ),
+                "field": "beauty", "affected": cnt_clustering,
+            })
+        else:
+            recs.append({
+                "priority": 3, "color": "#3b82f6",
+                "title":    "Nodos excluidos por optimización interna del router",
+                "detail":   (
+                    f"{cnt_clustering} nodo(s) afectado(s). "
+                    "Fueron excluidos por el optimizador para mejorar la calidad global de las rutas "
+                    "aunque beauty=false. Tienen tiempo y capacidad disponibles. "
+                    "Considera agregar un vehículo adicional o revisar la distribución geográfica."
+                ),
+                "field": "optimización global", "affected": cnt_clustering,
+            })
 
         ("capacity_time_general",
          "Revisar configuración de nodos sin causa específica detectada",
