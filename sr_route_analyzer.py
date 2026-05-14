@@ -186,6 +186,13 @@ def is_error_response(res):
 
 # Mensajes legibles por código de error de la documentación
 ERROR_CODE_MESSAGES = {
+    "E01004": ("Duración de descanso incompatible con el turno del vehículo",
+               "La ventana de descanso combinada con su duración no es compatible con el turno del vehículo.",
+               "Ajustar rest_time_start, rest_time_end o rest_time_duration para que quepan dentro del turno."),
+    "E01005": ("Ventana de descanso fuera del turno del vehículo",
+               "La ventana horaria de descanso no intersecta con el turno del vehículo. "
+               "El router no puede programar el descanso porque está fuera de la jornada.",
+               "Corregir rest_time_start y rest_time_end para que estén dentro del shift_start y shift_end del vehículo."),
     "E03001": ("Carga total de nodos insuficiente",
                "La suma de carga de todos los nodos es menor que la carga mínima × capacidad de los vehículos. "
                "El router no genera rutas porque no hay suficiente carga para justificarlas.",
@@ -508,6 +515,62 @@ def validate_request(req: dict) -> list:
                 ),
                 "fix": "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos.",
                 "nodes": no_overlap_nodes[:15],
+            })
+
+    # E01004/E01005 — Ventana de descanso incompatible con turno (enable_rest_time=true)
+    if req.get("enable_rest_time", False):
+        no_intersect = []   # E01005: descanso completamente fuera del turno
+        exceeds_shift = []  # E01004: descanso se extiende más allá del turno
+
+        for v in req.get("vehicles", []):
+            vid = v.get("ident", "?")
+            ss  = parse_time(v.get("shift_start", "00:01"))
+            se  = parse_time(v.get("shift_end",   "23:59"))
+            rs  = parse_time(v.get("rest_time_start"))
+            re  = parse_time(v.get("rest_time_end"))
+
+            if rs is None or re is None or ss is None or se is None:
+                continue
+
+            # E01005: sin solapamiento entre descanso y turno
+            if rs >= se or re <= ss:
+                no_intersect.append({
+                    "ident":   vid,
+                    "address": f"shift {v.get('shift_start')}–{v.get('shift_end')} | rest {v.get('rest_time_start')}–{v.get('rest_time_end')}",
+                })
+            # E01004: descanso se extiende más allá del fin del turno
+            elif re > se:
+                exceeds_shift.append({
+                    "ident":   vid,
+                    "address": f"shift {v.get('shift_start')}–{v.get('shift_end')} | rest {v.get('rest_time_start')}–{v.get('rest_time_end')} (excede {re-se} min)",
+                })
+
+        if no_intersect:
+            issues.append({
+                "code": "E01005", "severity": "critical",
+                "field": "rest_time_start / rest_time_end",
+                "value": f"{len(no_intersect)} vehículo(s)",
+                "title": f"Ventana de descanso fuera del turno — {len(no_intersect)} vehículo(s)",
+                "detail": (
+                    f"{len(no_intersect)} vehículo(s) tienen la ventana de descanso completamente "
+                    f"fuera de su turno. El router no puede programar el descanso (E01005) y no generará rutas."
+                ),
+                "fix": "Corregir rest_time_start y rest_time_end para que estén dentro del shift_start y shift_end.",
+                "nodes": no_intersect,
+            })
+
+        if exceeds_shift:
+            issues.append({
+                "code": "E01004", "severity": "high",
+                "field": "rest_time_end",
+                "value": f"{len(exceeds_shift)} vehículo(s)",
+                "title": f"Ventana de descanso se extiende más allá del turno — {len(exceeds_shift)} vehículo(s)",
+                "detail": (
+                    f"{len(exceeds_shift)} vehículo(s) tienen rest_time_end posterior a shift_end. "
+                    f"La ventana de descanso debe estar completamente dentro del turno (E01004)."
+                ),
+                "fix": "Ajustar rest_time_end para que no supere shift_end del vehículo.",
+                "nodes": exceeds_shift,
             })
 
     return issues
@@ -1502,9 +1565,12 @@ def main():
         friendly = ERROR_CODE_MESSAGES.get(err_code)
         if friendly:
             title, detail, fix = friendly
+            # Enrich with vehicle info if present in cause
+            id_vehicle = res.get("cause", {}).get("id_vehicle", "")
+            veh_info   = f" — Vehículo: `{id_vehicle}`" if id_vehicle else ""
             st.markdown(f"""
             <div class="error-banner">
-                <div class="error-title">⛔ {err_code} — {title}</div>
+                <div class="error-title">⛔ {err_code} — {title}{veh_info}</div>
                 <div style="font-size:14px;color:#7f1d1d;margin-top:6px;">{detail}</div>
                 <div style="font-size:12px;color:#991b1b;margin-top:8px;">✏️ {fix}</div>
             </div>""", unsafe_allow_html=True)
