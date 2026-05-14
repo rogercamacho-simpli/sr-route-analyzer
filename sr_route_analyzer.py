@@ -144,7 +144,6 @@ ISSUE_LABELS = {
     "capacity_overflow":     ("⚖️", "Capacidad excedida",       "badge-amber"),
     "zone_mismatch":         ("🗺️", "Zona sin vehículo",        "badge-amber"),
     "skills_mismatch":       ("🔧", "Skills faltantes",         "badge-amber"),
-    "group_invalid":         ("🔗", "Grupo inválido",           "badge-blue"),
     "max_visit_limit":       ("🔢", "Límite max_visit",          "badge-amber"),
     "clustering_preference": ("✦",  "Excluido por clustering",  "badge-gray"),
     "capacity_time_general": ("⚠️", "Cap/tiempo general",       "badge-amber"),
@@ -566,21 +565,7 @@ def analyze(req: dict, res: dict) -> dict:
                     "fix":    "Agregar las skills al vehículo correspondiente",
                 })
 
-        # 9. Grupo inválido (solo si el ident referenciado no existe en el request)
-        if len(node_group) > 1:
-            missing_group = [g for g in node_group if g != ident and g not in node_map]
-            if missing_group:
-                issues.append({
-                    "type": "group_invalid", "severity": "medium",
-                    "field": "group", "value": str(node_group),
-                    "detail": (
-                        f"El grupo de este nodo referencia ident(s) que no existen en el request: "
-                        f"{missing_group}. Puede impedir que el router procese el grupo."
-                    ),
-                    "fix": "Verificar que todos los idents del grupo existan en el request",
-                })
-
-        # 10. max_visit — vehículos llenos (sin otra causa detectada)
+        # 9. max_visit — vehículos llenos (sin otra causa detectada)
         if not issues and max_visit_global and vehicles_at_max:
             issues.append({
                 "type": "max_visit_limit", "severity": "medium",
@@ -724,12 +709,6 @@ def analyze(req: dict, res: dict) -> dict:
          "Estos nodos requieren skills que ningún vehículo tiene asignadas. "
          "El router no puede asignarlos a ningún vehículo.",
          3, "#3b82f6", "skills (vehículo)"),
-
-        ("group_invalid",
-         "Corregir referencias de grupos inválidas",
-         "Estos nodos referencian idents en su grupo que no existen en el request. "
-         "Puede generar comportamiento inesperado en el optimizador.",
-         3, "#3b82f6", "group"),
 
         ("clustering_preference",
          "Evaluar desactivar el parámetro beauty",
