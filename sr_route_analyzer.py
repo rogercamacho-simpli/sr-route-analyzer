@@ -1293,6 +1293,19 @@ def analyze(req: dict, res: dict) -> dict:
          "El router no puede asignarlos a ningún vehículo.",
          3, "#3b82f6", "skills (vehículo)"),
 
+        ("capacity_time_general",
+         "Revisar configuración de nodos sin causa específica detectada",
+         "No se identificó un problema concreto. Puede ser consecuencia de una combinación de restricciones globales. Revisar carga, duración y ventanas.",
+         4, "#6b7280", "múltiples campos"),
+    ]
+
+    COVERED_BY_PREFLIGHT = {"nodes_no_zone"}
+
+    for issue_type, title, detail, priority, color, field in issue_recs:
+        cnt = issue_counts.get(issue_type, 0)
+        if cnt > 0 and issue_type not in COVERED_BY_PREFLIGHT:
+            recs.append({"priority": priority, "color": color, "title": title, "detail": f"{cnt} nodo(s) afectado(s). {detail}", "field": field, "affected": cnt})
+
     # Recomendación clustering — dinámica según beauty
     cnt_clustering = issue_counts.get("clustering_preference", 0)
     if cnt_clustering > 0:
@@ -1326,7 +1339,6 @@ def analyze(req: dict, res: dict) -> dict:
          "No se identificó un problema concreto. Puede ser consecuencia de una combinación "
          "de restricciones globales. Revisar carga, duración y ventanas.",
          4, "#6b7280", "múltiples campos"),
-    ]
 
     # Tipos cubiertos por el pre-vuelo — no repetir en recomendaciones
     # El pre-vuelo ya muestra detalle + lista de nodos afectados
