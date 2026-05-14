@@ -117,7 +117,7 @@ def format_time_min(minutes):
 def is_error_response(res):
     return "errors" in res and "vehicles" not in res
 
-VALID_FMV = {1, 2, 3, 1.0, 2.0, 3.0}
+VALID_FMV = {1.0, 1.5, 2.0, 3.0}
 
 ISSUE_LABELS = {
     "duration_anomaly":      ("🕐", "Duration outlier",         "badge-red"),
@@ -152,10 +152,11 @@ def validate_request(req: dict) -> list:
             "field": "fmv", "value": str(fmv),
             "title": f"fmv={fmv} — valor no permitido",
             "detail": (
-                f"El campo fmv tiene el valor {fmv}, que no pertenece al conjunto válido {{1, 2, 3}}. "
+                f"El campo fmv tiene el valor {fmv}, que no pertenece al conjunto válido "
+                f"(1.0=Tráfico bajo, 1.5=Medio, 2.0=Alto, 3.0=Intenso). "
                 f"Puede causar un error E500 en el router ya que el validador no lo detecta previamente."
             ),
-            "fix": "Cambiar fmv a 1, 2 o 3",
+            "fix": "Cambiar fmv a 1.0, 1.5, 2.0 o 3.0",
             "nodes": [],
         })
 
