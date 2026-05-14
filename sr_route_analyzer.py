@@ -34,48 +34,49 @@ st.markdown("""
         border-radius: 10px !important;
     }
     [data-testid="stFileUploader"] section:hover { border-color: #6366f1 !important; }
-    .main-header { font-size: 26px; font-weight: 700; color: #1a1d2e; margin-bottom: 0; }
-    .sub-header  { font-size: 14px; color: #6b7280; margin-top: 4px; margin-bottom: 1.5rem; }
-    .upload-label { font-size: 14px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    .main-header { font-size: 26px; font-weight: 700; margin-bottom: 0; }
+    .sub-header  { font-size: 14px; opacity: 0.6; margin-top: 4px; margin-bottom: 1.5rem; }
+    .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; }
     .metric-card {
-        background: white; border-radius: 12px; padding: 18px 20px;
-        border: 1px solid #e8eaf0; margin-bottom: 0;
+        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
+        border: 1px solid rgba(128,128,128,0.2); margin-bottom: 0;
     }
     .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; }
-    .metric-lbl { font-size: 12px; color: #6b7280; margin-top: 4px; }
+    .metric-lbl { font-size: 12px; opacity: 0.6; margin-top: 4px; }
     .rec-card {
-        background: white; border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 12px; border: 1px solid #e8eaf0;
+        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
+        margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.2);
     }
-    .rec-title  { font-size: 15px; font-weight: 600; color: #1a1d2e; margin-bottom: 6px; }
-    .rec-detail { font-size: 13px; color: #4b5563; line-height: 1.55; }
-    .rec-field  { font-size: 11px; color: #6b7280; margin-top: 8px; }
+    .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+    .rec-detail { font-size: 13px; opacity: 0.8; line-height: 1.55; }
+    .rec-field  { font-size: 11px; opacity: 0.55; margin-top: 8px; }
     .badge {
         display: inline-block; padding: 2px 10px; border-radius: 20px;
         font-size: 11px; font-weight: 600; margin-right: 6px;
+        border: 1px solid currentColor;
     }
-    .badge-red   { background:#fee2e2; color:#dc2626; }
-    .badge-amber { background:#fef3c7; color:#b45309; }
-    .badge-blue  { background:#dbeafe; color:#1d4ed8; }
-    .badge-gray  { background:#f3f4f6; color:#4b5563; }
-    .badge-green { background:#dcfce7; color:#16a34a; }
-    .section-title { font-size: 16px; font-weight: 600; color: #1a1d2e; margin: 1.5rem 0 .75rem; }
+    .badge-red   { background: rgba(220,38,38,0.12);  color: #ef4444; }
+    .badge-amber { background: rgba(245,158,11,0.12); color: #f59e0b; }
+    .badge-blue  { background: rgba(59,130,246,0.12); color: #60a5fa; }
+    .badge-gray  { background: rgba(107,114,128,0.12);color: #9ca3af; }
+    .badge-green { background: rgba(22,163,74,0.12);  color: #4ade80; }
+    .section-title { font-size: 16px; font-weight: 600; margin: 1.5rem 0 .75rem; }
     .error-banner {
-        background: #fef2f2; border: 1.5px solid #fca5a5; border-radius: 12px;
-        padding: 20px 24px; margin-bottom: 1.5rem;
+        background: rgba(220,38,38,0.1); border: 1.5px solid rgba(220,38,38,0.4);
+        border-radius: 12px; padding: 20px 24px; margin-bottom: 1.5rem;
     }
-    .error-title { font-size: 18px; font-weight: 700; color: #dc2626; margin-bottom: 6px; }
+    .error-title { font-size: 18px; font-weight: 700; color: #ef4444; margin-bottom: 6px; }
     .preflight-card {
-        background: white; border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 10px; border: 1px solid #e8eaf0;
+        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
+        margin-bottom: 10px; border: 1px solid rgba(128,128,128,0.2);
     }
     .preflight-ok {
-        background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 12px;
-        padding: 14px 18px; margin-bottom: 10px; font-size: 13px;
-        color: #15803d; font-weight: 500;
+        background: rgba(22,163,74,0.1); border: 1px solid rgba(22,163,74,0.3);
+        border-radius: 12px; padding: 14px 18px; margin-bottom: 10px;
+        font-size: 13px; color: #4ade80; font-weight: 500;
     }
-    hr.divider { border: none; border-top: 1px solid #e8eaf0; margin: 1.5rem 0; }
-    code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    hr.divider { border: none; border-top: 1px solid rgba(128,128,128,0.2); margin: 1.5rem 0; }
+    code { background: rgba(128,128,128,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 </style>
 """, unsafe_allow_html=True)
 
