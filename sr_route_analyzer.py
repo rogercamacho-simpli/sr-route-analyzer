@@ -1046,7 +1046,25 @@ def analyze(req: dict, res: dict) -> dict:
                     "fix":    "Agregar las skills al vehículo correspondiente",
                 })
 
-        # 9. max_visit — vehículos llenos (sin otra causa detectada)
+        # 9. Nodo sin zona con vehículos que tienen zona (autoZone=false)
+        if not issues and not node_zones and not req.get("autoZone", False):
+            all_veh_zones_local = set()
+            for v in vehicles.values():
+                all_veh_zones_local.update(v.get("zones", []))
+            if all_veh_zones_local and not vehicles_no_zone:
+                issues.append({
+                    "type": "nodes_no_zone", "severity": "medium",
+                    "field": "zones (nodo)",
+                    "value": "zones=[]",
+                    "detail": (
+                        "Este nodo no tiene zona asignada pero todos los vehículos tienen zona. "
+                        "Con autoZone=false, el router atiende primero los nodos de la zona del vehículo "
+                        "y solo incluye los nodos sin zona si sobra capacidad y tiempo."
+                    ),
+                    "fix": "Asignar la zona correcta al nodo, o agregar un vehículo con zones=[] para que los cubra.",
+                })
+
+        # 10. max_visit — vehículos llenos (sin otra causa detectada)
         if not issues and max_visit_global and vehicles_at_max:
             issues.append({
                 "type": "max_visit_limit", "severity": "medium",
@@ -1243,6 +1261,12 @@ def analyze(req: dict, res: dict) -> dict:
          "Corregir ventanas horarias invertidas (E01006)",
          "window_start es posterior a window_end. El router rechaza estas ventanas.",
          2, "#f59e0b", "window_start / window_end"),
+
+        ("nodes_no_zone",
+         "Asignar zona a nodos sin zona o agregar vehículo sin restricción de zona",
+         "Estos nodos tienen zones=[] pero todos los vehículos tienen zona asignada. "
+         "Con autoZone=false el router los atiende solo si sobra capacidad tras cubrir su zona.",
+         2, "#f59e0b", "zones (nodo)"),
 
         ("zone_mismatch",
          "Asignar vehículos a las zonas sin cobertura",
