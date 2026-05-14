@@ -340,6 +340,204 @@ def analyze_filtered_nodes(req: dict, res: dict) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# COMPARATIVE ANALYSIS & FLEET UTILIZATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def comparative_analysis(req: dict, res: dict) -> dict:
+    """Compara nodos enrutados vs sin atender para identificar el diferenciador real."""
+    node_map   = {n["ident"]: n for n in req.get("nodes", [])}
+    unattended = res.get("unattendedClientsNodes", [])
+
+    routed_ids = set()
+    for v in res.get("vehicles", []):
+        for tour in v.get("tours", []):
+            for n in tour.get("nodes", []):
+                if not n["ident"].startswith("vehicle-"):
+                    routed_ids.add(n["ident"])
+
+    un_ids = {u["ident"] for u in unattended}
+    routed_nodes = [node_map[i] for i in routed_ids  if i in node_map]
+    un_nodes     = [node_map[i] for i in un_ids      if i in node_map]
+
+    if not routed_nodes or not un_nodes:
+        return {}
+
+    def avg(vals):
+        return round(float(np.mean(vals)), 1) if vals else 0
+
+    def window_min(n):
+        try:
+            ws = n.get("window_start", "")
+            we = n.get("window_end",   "")
+            h1, m1 = int(ws.split(":")[0]), int(ws.split(":")[1])
+            h2, m2 = int(we.split(":")[0]), int(we.split(":")[1])
+            return (h2*60+m2) - (h1*60+m1)
+        except:
+            return None
+
+    # Stats per group
+    def group_stats(nodes):
+        loads    = [n.get("load", 0) for n in nodes]
+        durs     = [try_int(n.get("duration")) for n in nodes]
+        durs     = [d for d in durs if d is not None]
+        windows  = [w for n in nodes if (w := window_min(n)) is not None]
+        return {
+            "load_mean":    avg(loads),
+            "load_median":  round(float(np.median(loads)), 1) if loads else 0,
+            "dur_mean":     avg(durs),
+            "window_mean":  avg(windows),
+            "count":        len(nodes),
+        }
+
+    r_stats = group_stats(routed_nodes)
+    u_stats = group_stats(un_nodes)
+
+    # Detect differentiators
+    differentiators = []
+
+    # Load differentiator
+    if r_stats["load_mean"] > 0 and u_stats["load_mean"] > 0:
+        ratio = r_stats["load_mean"] / max(u_stats["load_mean"], 0.01)
+        if ratio > 2.0:
+            differentiators.append({
+                "field":      "load (carga)",
+                "routed":     f"{r_stats['load_mean']:.0f}",
+                "unattended": f"{u_stats['load_mean']:.0f}",
+                "diff":       f"{ratio:.1f}×",
+                "severity":   "high",
+                "conclusion": (
+                    f"Los nodos enrutados tienen {ratio:.1f}× más carga que los sin atender "
+                    f"({r_stats['load_mean']:.0f} vs {u_stats['load_mean']:.0f}). "
+                    f"El router priorizó los de mayor carga — los de menor carga quedaron sin vehículo disponible."
+                ),
+                "fix": "Verificar si hay suficientes vehículos para cubrir todos los nodos, o revisar la lógica de priorización de carga.",
+            })
+        elif ratio < 0.5:
+            differentiators.append({
+                "field":      "load (carga)",
+                "routed":     f"{r_stats['load_mean']:.0f}",
+                "unattended": f"{u_stats['load_mean']:.0f}",
+                "diff":       f"{1/ratio:.1f}× mayor en sin atender",
+                "severity":   "high",
+                "conclusion": (
+                    f"Los nodos sin atender tienen {1/ratio:.1f}× más carga que los enrutados. "
+                    f"La capacidad de los vehículos puede ser insuficiente para los nodos más pesados."
+                ),
+                "fix": "Revisar si la carga de los nodos sin atender excede la capacidad de los vehículos disponibles.",
+            })
+
+    # Window differentiator
+    if r_stats["window_mean"] > 0 and u_stats["window_mean"] > 0:
+        w_ratio = r_stats["window_mean"] / max(u_stats["window_mean"], 0.01)
+        if w_ratio > 1.5:
+            differentiators.append({
+                "field":      "ventana de tiempo",
+                "routed":     f"{r_stats['window_mean']:.0f} min",
+                "unattended": f"{u_stats['window_mean']:.0f} min",
+                "diff":       f"{w_ratio:.1f}×",
+                "severity":   "high",
+                "conclusion": (
+                    f"Los nodos enrutados tienen ventanas {w_ratio:.1f}× más amplias "
+                    f"({r_stats['window_mean']:.0f} vs {u_stats['window_mean']:.0f} min). "
+                    f"Las ventanas estrechas de los nodos sin atender no permiten encadenar visitas."
+                ),
+                "fix": "Ampliar las ventanas de tiempo de los nodos sin atender para permitir encadenamiento de visitas.",
+            })
+        elif w_ratio < 0.67:
+            differentiators.append({
+                "field":      "ventana de tiempo",
+                "routed":     f"{r_stats['window_mean']:.0f} min",
+                "unattended": f"{u_stats['window_mean']:.0f} min",
+                "diff":       f"{1/w_ratio:.1f}× mayor en sin atender",
+                "severity":   "medium",
+                "conclusion": (
+                    f"Los nodos sin atender tienen ventanas más amplias pero aun así no fueron cubiertos. "
+                    f"La ventana no es el diferenciador principal."
+                ),
+                "fix": "Revisar otros factores como geografía o disponibilidad de vehículos.",
+            })
+
+    # Duration differentiator
+    if r_stats["dur_mean"] > 0 and u_stats["dur_mean"] > 0:
+        d_ratio = r_stats["dur_mean"] / max(u_stats["dur_mean"], 0.01)
+        if d_ratio > 2.0 or d_ratio < 0.5:
+            differentiators.append({
+                "field":      "duration (servicio)",
+                "routed":     f"{r_stats['dur_mean']:.0f} min",
+                "unattended": f"{u_stats['dur_mean']:.0f} min",
+                "diff":       f"{max(d_ratio, 1/d_ratio):.1f}×",
+                "severity":   "medium",
+                "conclusion": (
+                    f"Diferencia significativa en tiempos de servicio entre grupos "
+                    f"({r_stats['dur_mean']:.0f} vs {u_stats['dur_mean']:.0f} min)."
+                ),
+                "fix": "Revisar si la duración de servicio de los nodos sin atender es correcta.",
+            })
+
+    return {
+        "routed_stats":   r_stats,
+        "unatt_stats":    u_stats,
+        "differentiators": differentiators,
+    }
+
+
+def fleet_utilization(req: dict, res: dict) -> dict:
+    """Analiza la utilización real de cada vehículo: visitas, carga y % de capacidad."""
+    vehicles   = {v["ident"]: v for v in req.get("vehicles", [])}
+    node_map   = {n["ident"]: n for n in req.get("nodes",    [])}
+
+    # Build load per vehicle from response
+    veh_data = {}
+    for v_res in res.get("vehicles", []):
+        vid   = v_res["ident"]
+        v_req = vehicles.get(vid, {})
+        visits = 0
+        load1  = 0.0
+        for tour in v_res.get("tours", []):
+            for n in tour.get("nodes", []):
+                if not n["ident"].startswith("vehicle-"):
+                    visits += 1
+                    req_n   = node_map.get(n["ident"], {})
+                    load1  += req_n.get("load", 0) or 0
+
+        cap1 = v_req.get("capacity", 0) or 0
+        pct  = round(load1 / cap1 * 100, 1) if cap1 > 0 and cap1 < 1e15 else None
+
+        veh_data[vid] = {
+            "visits":   visits,
+            "load1":    round(load1, 1),
+            "cap1":     cap1,
+            "cap_pct":  pct,
+            "at_cap":   pct is not None and pct >= 90,
+        }
+
+    active  = {k: v for k, v in veh_data.items() if v["visits"] > 0}
+    idle    = {k: v for k, v in veh_data.items() if v["visits"] == 0}
+    at_cap  = {k: v for k, v in active.items()   if v["at_cap"]}
+
+    visits_list = [v["visits"] for v in active.values()]
+    avg_visits  = round(float(np.mean(visits_list)), 1) if visits_list else 0
+
+    # Flag: each vehicle only does 1 visit
+    single_visit_ratio = sum(1 for v in visits_list if v == 1) / max(len(visits_list), 1)
+
+    return {
+        "total":              len(veh_data),
+        "active":             len(active),
+        "idle":               len(idle),
+        "at_cap":             len(at_cap),
+        "avg_visits":         avg_visits,
+        "max_visits":         max(visits_list) if visits_list else 0,
+        "min_visits":         min(visits_list) if visits_list else 0,
+        "single_visit_ratio": round(single_visit_ratio * 100, 1),
+        "veh_data":           veh_data,
+        "alert_single":       single_visit_ratio > 0.8,
+        "alert_idle":         len(idle) > len(veh_data) * 0.2,
+        "alert_at_cap":       len(at_cap) > len(active) * 0.5,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ANALYSIS ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1040,6 +1238,87 @@ def main():
     else:
         for idx, rec in enumerate(findings["recommendations"], 1):
             render_recommendation(rec, idx)
+
+    # ── ANÁLISIS COMPARATIVO ──────────────────────────────────────────────────
+    comp = comparative_analysis(req, res)
+    if comp:
+        st.markdown('<div class="section-title">🔬 Análisis comparativo: enrutados vs sin atender</div>', unsafe_allow_html=True)
+
+        r = comp["routed_stats"]
+        u = comp["unatt_stats"]
+
+        # Tabla comparativa
+        comp_rows = [
+            {"Campo": "Nodos", "Enrutados": r["count"], "Sin atender": u["count"], "Diferencia": "—"},
+            {"Campo": "Load promedio",    "Enrutados": r["load_mean"],   "Sin atender": u["load_mean"],   "Diferencia": f"{r['load_mean']/max(u['load_mean'],0.01):.1f}×" if u["load_mean"] > 0 else "—"},
+            {"Campo": "Load mediana",     "Enrutados": r["load_median"], "Sin atender": u["load_median"], "Diferencia": "—"},
+            {"Campo": "Duration promedio","Enrutados": f"{r['dur_mean']} min",  "Sin atender": f"{u['dur_mean']} min",  "Diferencia": "—"},
+            {"Campo": "Ventana promedio", "Enrutados": f"{r['window_mean']} min","Sin atender": f"{u['window_mean']} min","Diferencia": "—"},
+        ]
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+
+        # Diferenciadores detectados
+        if comp["differentiators"]:
+            for d in comp["differentiators"]:
+                sev_color = "#ef4444" if d["severity"] == "high" else "#f59e0b"
+                st.markdown(f"""
+                <div class="rec-card" style="border-left: 4px solid {sev_color};">
+                    <div class="rec-title">🔍 Diferenciador: {d['field']}</div>
+                    <div class="rec-detail">
+                        <b>Enrutados:</b> {d['routed']} &nbsp;|&nbsp;
+                        <b>Sin atender:</b> {d['unattended']} &nbsp;|&nbsp;
+                        <b>Ratio:</b> {d['diff']}<br><br>
+                        {d['conclusion']}
+                    </div>
+                    <div class="rec-field">✏️ {d['fix']}</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.info("No se detectó un diferenciador claro entre ambos grupos. Los grupos son estadísticamente similares en carga, duración y ventana.")
+
+    # ── UTILIZACIÓN DE FLOTA ──────────────────────────────────────────────────
+    fleet = fleet_utilization(req, res)
+    if fleet:
+        st.markdown('<div class="section-title">🚛 Utilización de flota</div>', unsafe_allow_html=True)
+
+        f1, f2, f3, f4, f5 = st.columns(5)
+        with f1: render_metric("Vehículos activos",  fleet["active"])
+        with f2: render_metric("Vehículos inactivos", fleet["idle"], "#f59e0b" if fleet["alert_idle"] else "#6b7280")
+        with f3: render_metric("Visitas promedio/veh", fleet["avg_visits"])
+        with f4: render_metric("Máx visitas/veh",    fleet["max_visits"])
+        with f5: render_metric("Al 90%+ capacidad",  fleet["at_cap"], "#ef4444" if fleet["alert_at_cap"] else "#6b7280")
+
+        # Alertas sistémicas
+        if fleet["alert_single"]:
+            st.error(
+                f"⚠️ **{fleet['single_visit_ratio']:.0f}% de los vehículos activos hicieron exactamente 1 visita.** "
+                f"Esto indica que los vehículos no pueden encadenar visitas — posiblemente por ventanas de tiempo "
+                f"demasiado estrechas o ubicaciones de inicio alejadas de los nodos."
+            )
+        if fleet["alert_idle"]:
+            st.warning(
+                f"🚛 **{fleet['idle']} vehículos ({fleet['idle']/max(fleet['total'],1)*100:.0f}%) no realizaron ninguna visita.** "
+                f"Revisar si sus ubicaciones de inicio o turnos son compatibles con los nodos disponibles."
+            )
+        if fleet["alert_at_cap"]:
+            st.error(
+                f"⚖️ **{fleet['at_cap']} vehículos llegaron al 90%+ de su capacidad de carga.** "
+                f"La capacidad de la flota puede ser insuficiente para absorber todos los nodos."
+            )
+
+        # Tabla por vehículo (solo activos)
+        with st.expander("Ver detalle por vehículo", expanded=False):
+            veh_rows = []
+            for vid, vd in sorted(fleet["veh_data"].items(), key=lambda x: -x[1]["visits"]):
+                cap_str = f"{vd['cap_pct']}%" if vd["cap_pct"] is not None else "cap. ilimitada"
+                veh_rows.append({
+                    "Vehículo":      vid,
+                    "Visitas":       vd["visits"],
+                    "Carga total":   vd["load1"],
+                    "Capacidad":     vd["cap1"] if vd["cap1"] < 1e15 else "ilimitada",
+                    "% Capacidad":   cap_str,
+                    "Estado":        "🔴 Al límite" if vd["at_cap"] else ("🟢 Activo" if vd["visits"] > 0 else "⚪ Inactivo"),
+                })
+            st.dataframe(pd.DataFrame(veh_rows), use_container_width=True, hide_index=True)
 
     st.markdown('<div class="section-title">📊 Análisis por zona</div>', unsafe_allow_html=True)
     zone_rows = []
