@@ -121,7 +121,11 @@ def detect_outliers_iqr(values):
     q1 = np.percentile(arr, 25)
     q3 = np.percentile(arr, 75)
     iqr = q3 - q1
-    upper = q3 + 1.5 * iqr
+    # Multiplier 3.0 (vs standard 1.5) to avoid false positives
+    # Only flag extreme outliers, not legitimate variation
+    if iqr == 0:
+        return set()
+    upper = q3 + 3.0 * iqr
     return {v for v in arr if v > upper}
 
 def format_time_min(minutes):
@@ -145,6 +149,8 @@ ISSUE_LABELS = {
     "zone_mismatch":         ("🗺️", "Zona sin vehículo",        "badge-amber"),
     "skills_mismatch":       ("🔧", "Skills faltantes",         "badge-amber"),
     "max_visit_limit":       ("🔢", "Límite max_visit",          "badge-amber"),
+    "tight_window":          ("⏳", "Ventana = duración",        "badge-red"),
+    "exc_so_001":            ("🕐", "Excluido por ventana",      "badge-red"),
     "clustering_preference": ("✦",  "Excluido por clustering",  "badge-gray"),
     "capacity_time_general": ("⚠️", "Cap/tiempo general",       "badge-amber"),
     "zero_coordinates":      ("📍", "Coordenadas (0,0)",         "badge-red"),
@@ -464,7 +470,7 @@ def analyze(req: dict, res: dict) -> dict:
                 "fix":    "Ampliar window_end o establecer duration=0",
             })
 
-        # 2. Ventana estrecha
+        # 2. Ventana estrecha (ventana < duración)
         elif ws_m is not None and we_m is not None and node_dur is not None:
             window_size = we_m - ws_m
             if 0 < window_size < node_dur:
@@ -474,6 +480,19 @@ def analyze(req: dict, res: dict) -> dict:
                     "value": f"ventana={window_size} min < duration={node_dur} min",
                     "detail": f"Ventana de {window_size} min es menor que la duración de servicio ({node_dur} min).",
                     "fix":    "Ampliar window_end o reducir duration",
+                })
+            # 2b. Ventana igual a duración (sin tiempo para traslado)
+            elif window_size == node_dur and node_dur > 0:
+                issues.append({
+                    "type": "tight_window", "severity": "high",
+                    "field": "window_end / duration",
+                    "value": f"ventana={window_size} min == duration={node_dur} min",
+                    "detail": (
+                        f"La ventana de tiempo ({window_size} min) es exactamente igual a la duración "
+                        f"de servicio ({node_dur} min), dejando 0 minutos para el traslado. "
+                        f"El router no puede llegar, atender y salir dentro del mismo intervalo."
+                    ),
+                    "fix": "Ampliar window_end al menos 15–30 min más allá de la duración de servicio",
                 })
 
         # 3. Duration outlier
@@ -591,6 +610,17 @@ def analyze(req: dict, res: dict) -> dict:
                     ),
                     "fix": "Probar con beauty=false para priorizar atender todos los nodos",
                 })
+            elif cause_code == "EXC_SO-001":
+                issues.append({
+                    "type": "exc_so_001", "severity": "high",
+                    "field": "window_start / window_end",
+                    "value": cause_code,
+                    "detail": (
+                        "El nodo fue excluido por restricción de ventana de tiempo antes de la "
+                        "optimización. Ningún vehículo puede alcanzarlo dentro de su ventana horaria."
+                    ),
+                    "fix": "Ampliar la ventana de tiempo o revisar el turno de los vehículos candidatos",
+                })
             else:
                 issues.append({
                     "type": "capacity_time_general", "severity": "medium",
@@ -669,6 +699,19 @@ def analyze(req: dict, res: dict) -> dict:
             })
 
     issue_recs = [
+        ("tight_window",
+         "Ampliar ventanas iguales a la duración de servicio",
+         "La ventana de tiempo es exactamente igual a la duración de servicio, "
+         "dejando 0 minutos para el traslado. El router no puede completar la visita "
+         "dentro del intervalo. Ampliar la ventana al menos 15–30 min adicionales.",
+         1, "#ef4444", "window_end"),
+
+        ("exc_so_001",
+         "Revisar ventanas de nodos excluidos antes de optimizar (EXC_SO-001)",
+         "Estos nodos fueron descartados por el router antes de la optimización "
+         "por incompatibilidad de ventana horaria con los vehículos disponibles.",
+         2, "#f59e0b", "window_start / window_end"),
+
         ("zero_window",
          "Corregir nodos con ventana de 0 minutos",
          "Estos nodos tienen window_start igual a window_end con duration > 0. "
@@ -1013,29 +1056,6 @@ def main():
             "Desborde":            "🔴 Sí" if zs["overflow"] else "🟢 No",
         })
     st.dataframe(pd.DataFrame(zone_rows), use_container_width=True, hide_index=True)
-
-    zones_data = [(z, zs) for z, zs in findings["zone_stats"].items() if zs["avail_min"] > 0]
-    if zones_data:
-        fig = go.Figure()
-        z_labels = [str(z) for z, _ in zones_data]
-        fig.add_bar(
-            name="Tiempo servicio total", x=z_labels,
-            y=[zs["total_dur"] for _, zs in zones_data],
-            marker_color=["#ef4444" if zs["overflow"] else "#3b82f6" for _, zs in zones_data],
-        )
-        fig.add_bar(
-            name="Ventana total disponible", x=z_labels,
-            y=[zs["avail_min"] for _, zs in zones_data],
-            marker_color="#d1d5db",
-        )
-        fig.update_layout(
-            barmode="group",
-            title="Tiempo de servicio total vs ventana disponible por zona (todos los vehículos)",
-            plot_bgcolor="white", paper_bgcolor="white", height=300,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(t=50, b=40),
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
     if findings["raw_issue_counts"]:
         st.markdown('<div class="section-title">🔍 Distribución de causas</div>', unsafe_allow_html=True)
