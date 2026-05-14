@@ -1498,14 +1498,8 @@ def render_preflight_issue(issue):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    st.markdown("""
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:0.25rem;">
-        <span style="font-size:32px;">🗺️</span>
-        <div>
-            <div class="main-header">SimpliRoute — Route Analyzer</div>
-            <div class="sub-header">Validación pre-vuelo · Diagnóstico de nodos sin atender · Recomendaciones priorizadas</div>
-        </div>
-    </div>""", unsafe_allow_html=True)
+    st.markdown("# 🗺️ SimpliRoute — Route Analyzer")
+    st.caption("Validación pre-vuelo · Diagnóstico de nodos sin atender · Recomendaciones priorizadas")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
