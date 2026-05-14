@@ -43,14 +43,14 @@ st.markdown("""
     .sub-header  { font-size: 14px; margin-top: 4px; margin-bottom: 1.5rem; color: inherit; }
     .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: inherit; }
     .metric-card {
-        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
-        border: 1px solid rgba(128,128,128,0.2); margin-bottom: 0;
+        border-radius: 12px; padding: 18px 20px;
+        border: 1px solid rgba(128,128,128,0.25); margin-bottom: 0;
     }
     .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; color: inherit; }
     .metric-lbl { font-size: 12px; margin-top: 4px; color: inherit; }
     .rec-card {
-        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.2);
+        border-radius: 12px; padding: 18px 20px;
+        margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.25);
     }
     .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: inherit; }
     .rec-detail { font-size: 13px; line-height: 1.55; color: inherit; }
@@ -72,8 +72,8 @@ st.markdown("""
     }
     .error-title { font-size: 18px; font-weight: 700; color: #ef4444; margin-bottom: 6px; }
     .preflight-card {
-        background: rgba(128,128,128,0.08); border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 10px; border: 1px solid rgba(128,128,128,0.2);
+        border-radius: 12px; padding: 18px 20px;
+        margin-bottom: 10px; border: 1px solid rgba(128,128,128,0.25);
     }
     .preflight-ok {
         background: rgba(22,163,74,0.1); border: 1px solid rgba(22,163,74,0.3);
@@ -1479,7 +1479,7 @@ def render_preflight_issue(issue):
         if rows:
             nodes_html = (
                 f"<table style='margin-top:8px;width:100%;border-collapse:collapse;"
-                f"background:#f9fafb;border-radius:6px;overflow:hidden'>{rows}</table>"
+                f"border-radius:6px;overflow:hidden'>{rows}</table>"
             )
 
     st.markdown(f"""
