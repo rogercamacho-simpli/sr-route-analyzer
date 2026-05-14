@@ -133,7 +133,48 @@ def format_time_min(minutes):
         return "N/A"
     return f"{int(minutes // 60)}h {int(minutes % 60):02d}m"
 
-def is_error_response(res):
+def parse_upload(file) -> dict:
+    """
+    Parsea un archivo subido. Soporta:
+    - JSON puro (.json o .txt)
+    - Formato curl con --data-raw '...' o --data '...'
+    """
+    content = file.read().decode("utf-8", errors="replace").strip()
+
+    # Intento 1: JSON directo
+    try:
+        return json.loads(content)
+    except Exception:
+        pass
+
+    # Intento 2: curl con --data-raw o --data
+    import re
+    patterns = [
+        r"--data-raw\s+'(.*)'$",
+        r'--data-raw\s+"(.*)"$',
+        r"--data\s+'(.*)'$",
+        r'--data\s+"(.*)"$',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except Exception:
+                pass
+
+    # Intento 3: buscar primer { hasta el último } (JSON embebido)
+    start = content.find("{")
+    end   = content.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(content[start:end+1])
+        except Exception:
+            pass
+
+    raise ValueError("No se pudo parsear el archivo. Asegúrate de que sea JSON o formato curl.")
+
+
     return "errors" in res and "vehicles" not in res
 
 VALID_FMV = {1.0, 1.5, 2.0, 3.0}
@@ -1080,21 +1121,21 @@ def main():
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<div class="upload-label">📥 Cargar Request JSON</div>', unsafe_allow_html=True)
-        req_file = st.file_uploader("request", type="json", key="req", label_visibility="collapsed")
+        st.markdown('<div class="upload-label">📥 Cargar Request (JSON o cURL)</div>', unsafe_allow_html=True)
+        req_file = st.file_uploader("request", type=["json", "txt"], key="req", label_visibility="collapsed")
     with col2:
-        st.markdown('<div class="upload-label">📤 Cargar Response JSON</div>', unsafe_allow_html=True)
-        res_file = st.file_uploader("response", type="json", key="res", label_visibility="collapsed")
+        st.markdown('<div class="upload-label">📤 Cargar Response (JSON o cURL)</div>', unsafe_allow_html=True)
+        res_file = st.file_uploader("response", type=["json", "txt"], key="res", label_visibility="collapsed")
 
     if not req_file or not res_file:
         st.info("Carga ambos archivos para iniciar el análisis.")
         return
 
     try:
-        req = json.load(req_file)
-        res = json.load(res_file)
+        req = parse_upload(req_file)
+        res = parse_upload(res_file)
     except Exception as e:
-        st.error(f"Error al parsear los archivos JSON: {e}")
+        st.error(f"Error al parsear los archivos: {e}")
         return
 
     # ── PRE-FLIGHT ────────────────────────────────────────────────────────────
