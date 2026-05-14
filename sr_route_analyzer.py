@@ -175,6 +175,7 @@ def parse_upload(file) -> dict:
     raise ValueError("No se pudo parsear el archivo. Asegúrate de que sea JSON o formato curl.")
 
 
+def is_error_response(res):
     return "errors" in res and "vehicles" not in res
 
 VALID_FMV = {1.0, 1.5, 2.0, 3.0}
