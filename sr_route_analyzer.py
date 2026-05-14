@@ -1135,13 +1135,13 @@ def analyze(req: dict, res: dict) -> dict:
                 else:
                     issues.append({
                         "type": "clustering_preference", "severity": "medium",
-                        "field": "optimización global", "value": cause_code,
+                        "field": "flota / turno", "value": cause_code,
                         "detail": (
-                            "El optimizador excluyó este nodo para mejorar la calidad global de las rutas "
-                            "(beauty=false, pero el algoritmo aplicó exclusión por optimización interna). "
-                            "El nodo tiene tiempo y capacidad disponibles pero incluirlo empeoraría otras rutas."
+                            "El optimizador descartó este nodo porque no encontró forma de incluirlo "
+                            "sin afectar la calidad del resto de las rutas. "
+                            "Tiene tiempo y capacidad disponibles."
                         ),
-                        "fix": "Considerar agregar un vehículo adicional o revisar la distribución geográfica de los nodos.",
+                        "fix": "Agregar un vehículo adicional o ampliar el turno.",
                     })
             elif cause_code == "EXC_SO-001":
                 issues.append({
@@ -1331,14 +1331,14 @@ def analyze(req: dict, res: dict) -> dict:
         else:
             recs.append({
                 "priority": 3, "color": "#3b82f6",
-                "title":    "Nodos excluidos por optimización interna del router",
+                "title":    "Nodos descartados por el optimizador sin causa específica",
                 "detail":   (
-                    f"{cnt_clustering} nodo(s) afectado(s). "
-                    "Fueron excluidos por el optimizador para mejorar la calidad global de las rutas "
-                    "aunque beauty=false. Tienen tiempo y capacidad disponibles. "
-                    "Considera agregar un vehículo adicional o revisar la distribución geográfica."
+                    f"{cnt_clustering} nodo(s) fueron descartados por el optimizador. "
+                    "Con los vehículos y tiempos actuales no encontró una forma de incluirlos "
+                    "sin afectar la calidad del resto de las rutas. "
+                    "Considera agregar un vehículo adicional o ampliar el turno."
                 ),
-                "field": "optimización global", "affected": cnt_clustering,
+                "field": "flota / turno", "affected": cnt_clustering,
             })
 
     recs.sort(key=lambda r: r["priority"])
