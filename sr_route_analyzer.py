@@ -27,7 +27,12 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    [data-testid="stAppViewContainer"] { background: #f7f8fc; }
+    [data-testid="stAppViewContainer"] { background: transparent; }
+    .stMarkdown div, .stMarkdown p, .stMarkdown span { color: inherit !important; }
+    .metric-val, .metric-lbl, .rec-title, .rec-detail, .rec-field,
+    .section-title, .upload-label, .main-header, .sub-header {
+        color: inherit !important;
+    }
     [data-testid="stFileUploader"] section {
         background: white !important;
         border: 1.5px dashed #d1d5db !important;
