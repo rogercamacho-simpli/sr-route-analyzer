@@ -99,6 +99,79 @@ def time_overlap(ws1, we1, ws2, we2):
         return True
     return s1 <= e2 and s2 <= e1
 
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Distancia real en km entre dos coordenadas."""
+    import math
+    R = 6371
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def analyze_filtered_nodes(req: dict, res: dict) -> list:
+    """
+    Analiza filteredClientsNodes: nodos que el router descartó antes de optimizar.
+    Detecta causa W00001 y calcula distancia geográfica vehículo → nodo.
+    """
+    filtered   = res.get("filteredClientsNodes", [])
+    node_map   = {n["ident"]: n for n in req.get("nodes", [])}
+    vehicles   = req.get("vehicles", [])
+
+    results = []
+    for fn in filtered:
+        ident      = fn["ident"]
+        codes      = fn.get("cause", {}).get("codes", [])
+        req_node   = node_map.get(ident, {})
+        nlat       = fn.get("lat") or req_node.get("lat")
+        nlon       = fn.get("lon") or req_node.get("lon")
+
+        # Distancia mínima a cualquier vehículo
+        min_dist   = None
+        nearest_v  = None
+        shift_min  = None
+        for v in vehicles:
+            vlat = v.get("location_start", {}).get("lat")
+            vlon = v.get("location_start", {}).get("lon")
+            if vlat and vlon and nlat and nlon:
+                d = haversine_km(vlat, vlon, nlat, nlon)
+                if min_dist is None or d < min_dist:
+                    min_dist  = d
+                    nearest_v = v
+                    ss = parse_time(v.get("shift_start", "00:01"))
+                    se = parse_time(v.get("shift_end",   "23:59"))
+                    shift_min = (se - ss) if (ss and se) else None
+
+        # Diagnóstico de distancia
+        geo_issue = False
+        geo_detail = ""
+        if min_dist is not None and shift_min is not None:
+            # Tiempo estimado solo ida a 60 km/h
+            travel_min = (min_dist / 60) * 60
+            if travel_min * 2 > shift_min:
+                geo_issue  = True
+                geo_detail = (
+                    f"El vehículo más cercano está a ~{min_dist:.0f} km "
+                    f"({travel_min:.0f} min solo ida a 60 km/h). "
+                    f"El turno disponible es de {shift_min} min — "
+                    f"insuficiente para ir y volver."
+                )
+
+        results.append({
+            "ident":      ident,
+            "address":    req_node.get("address", "N/A")[:60],
+            "codes":      codes,
+            "load":       fn.get("load", 0),
+            "load_2":     fn.get("load_2", 0),
+            "load_3":     fn.get("load_3", 0),
+            "dist_km":    round(min_dist, 1) if min_dist else None,
+            "geo_issue":  geo_issue,
+            "geo_detail": geo_detail,
+            "nearest_v":  nearest_v.get("ident") if nearest_v else None,
+        })
+
+    return results
+
 def detect_outliers_iqr(values):
     arr = [v for v in values if v is not None and v > 0]
     if len(arr) < 4:
@@ -743,8 +816,73 @@ def main():
 
     # ── NODOS SIN ATENDER ─────────────────────────────────────────────────────
     unattended = res.get("unattendedClientsNodes", [])
+    filtered   = res.get("filteredClientsNodes", [])
+    veh_used   = res.get("num_vehicles_used", 0)
+
+    # Alerta: 0 vehículos usados
+    if veh_used == 0 and (unattended or filtered):
+        st.markdown("""
+        <div class="error-banner">
+            <div class="error-title">⚠️ El router no generó ninguna ruta (num_vehicles_used = 0)</div>
+            <div style="font-size:13px;color:#7f1d1d;margin-top:4px;">
+                Todos los nodos fueron descartados antes o durante la optimización.
+                Revisa el diagnóstico a continuación.
+            </div>
+        </div>""", unsafe_allow_html=True)
+
+    # ── filteredClientsNodes ───────────────────────────────────────────────────
+    if filtered:
+        st.markdown(
+            f'<div class="section-title">🚫 Nodos filtrados antes de optimizar '
+            f'({len(filtered)})</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Estos nodos fueron descartados por el router ANTES de generar rutas. "
+            "No aparecen en unattendedClientsNodes — la herramienta los analiza aquí."
+        )
+
+        filtered_analysis = analyze_filtered_nodes(req, res)
+
+        # Tabla resumen
+        rows = []
+        for fn in filtered_analysis:
+            rows.append({
+                "Ident":       fn["ident"],
+                "Dirección":   fn["address"],
+                "Código":      ", ".join(fn["codes"]),
+                "Dist. veh (km)": fn["dist_km"] if fn["dist_km"] else "—",
+                "Problema geo": "🔴 Sí" if fn["geo_issue"] else "🟢 No",
+                "Load 1/2/3":  f"{fn['load']:.0f} / {fn['load_2']:.0f} / {fn['load_3']:.0f}",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Detalle por nodo
+        for fn in filtered_analysis:
+            code_str = ", ".join(fn["codes"])
+            icon = "🔴" if fn["geo_issue"] else "🟡"
+            with st.expander(f"{icon} **{fn['ident']}** — {fn['address'][:55]}", expanded=fn["geo_issue"]):
+                st.markdown(f"**Código(s):** `{code_str}`")
+                if fn["dist_km"]:
+                    st.markdown(f"**Distancia al vehículo {fn['nearest_v']}:** {fn['dist_km']} km")
+                if fn["geo_issue"]:
+                    st.error(f"🗺️ Incompatibilidad geográfica: {fn['geo_detail']}")
+                    st.markdown(
+                        "**Fix:** Verificar que el punto de inicio del vehículo corresponda "
+                        "a la misma ciudad/región que los nodos, o asignar un vehículo local."
+                    )
+                elif fn["codes"] == ["W00001"]:
+                    st.warning(
+                        "Código W00001 sin incompatibilidad geográfica detectada. "
+                        "Posibles causas: coordenadas fuera del país configurado, "
+                        "zona de exclusión, o nodo con datos inválidos."
+                    )
+
+    if not unattended and not filtered:
+        st.success("✅ No hay nodos sin atender ni filtrados en este response.")
+        return
+
     if not unattended:
-        st.success("✅ No hay nodos sin atender en este response.")
         return
 
     with st.spinner("Analizando..."):
