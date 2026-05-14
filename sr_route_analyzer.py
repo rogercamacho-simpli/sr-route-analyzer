@@ -190,9 +190,10 @@ ISSUE_LABELS = {
     "capacity_overflow":     ("⚖️", "Capacidad excedida",       "badge-amber"),
     "zone_mismatch":         ("🗺️", "Zona sin vehículo",        "badge-amber"),
     "skills_mismatch":       ("🔧", "Skills faltantes",         "badge-amber"),
-    "max_visit_limit":       ("🔢", "Límite max_visit",          "badge-amber"),
-    "tight_window":          ("⏳", "Ventana = duración",        "badge-red"),
-    "exc_so_001":            ("🕐", "Excluido por ventana",      "badge-red"),
+    "max_visit_limit":       ("🔢", "Límite max_visit",                      "badge-amber"),
+    "tight_window":          ("⏳", "Ventana = duración",                    "badge-red"),
+    "exc_so_001":            ("🕐", "Excluido por ventana",                  "badge-red"),
+    "shift_time_exhausted":  ("🏁", "Turno insuficiente para todas las visitas", "badge-red"),
     "clustering_preference": ("✦",  "Excluido por clustering",  "badge-gray"),
     "capacity_time_general": ("⚠️", "Cap/tiempo general",       "badge-amber"),
     "zero_coordinates":      ("📍", "Coordenadas (0,0)",         "badge-red"),
@@ -619,6 +620,39 @@ def analyze(req: dict, res: dict) -> dict:
         if routed_per_vehicle.get(vid, 0) == 0:
             vehicles_idle.append(vid)
 
+    # ── Último estado de cada vehículo (posición + tiempo salida) ─────────────
+    vehicle_last_state = {}
+    for v_res in res.get("vehicles", []):
+        vid = v_res["ident"]
+        v_req = vehicles.get(vid, {})
+        shift_end_min = parse_time(v_req.get("shift_end", "23:59"))
+        last_lat = last_lon = last_dep_min = None
+
+        for tour in v_res.get("tours", []):
+            real_nodes = [n for n in tour.get("nodes", []) if not n["ident"].startswith("vehicle-")]
+            if real_nodes:
+                last_n    = real_nodes[-1]
+                req_last  = node_map.get(last_n["ident"], {})
+                last_lat  = req_last.get("lat")
+                last_lon  = req_last.get("lon")
+                dep_str   = last_n.get("departure", "")
+                if dep_str:
+                    try:
+                        h, m, *_ = dep_str.split(":")
+                        last_dep_min = int(h) * 60 + int(m)
+                    except Exception:
+                        pass
+
+        if last_lat is not None and shift_end_min is not None and last_dep_min is not None:
+            remaining = shift_end_min - last_dep_min
+            vehicle_last_state[vid] = {
+                "lat":       last_lat,
+                "lon":       last_lon,
+                "dep_min":   last_dep_min,
+                "shift_end": shift_end_min,
+                "remaining": remaining,
+            }
+
     # ── Zonas ─────────────────────────────────────────────────────────────────
     zone_to_vehicles = defaultdict(list)
     for vid, v in vehicles.items():
@@ -838,7 +872,47 @@ def analyze(req: dict, res: dict) -> dict:
                 "fix": f"Aumentar max_visit por encima de {max_visit_global} o reasignar vehículos inactivos",
             })
 
-        # Fallback
+        # Fallback — Turno insuficiente para cubrir todas las visitas
+        if not issues and vehicle_last_state:
+            node_lat = req_node.get("lat")
+            node_lon = req_node.get("lon")
+            if node_lat and node_lon:
+                # Find nearest active vehicle's last state
+                best_veh = None
+                best_rem = None
+                best_travel = None
+                for vid, vs in vehicle_last_state.items():
+                    dist_km    = haversine_km(vs["lat"], vs["lon"], node_lat, node_lon)
+                    travel_min = (dist_km / 60) * 60  # ~60 km/h
+                    if best_veh is None or dist_km < haversine_km(
+                        vehicle_last_state[best_veh]["lat"],
+                        vehicle_last_state[best_veh]["lon"],
+                        node_lat, node_lon
+                    ):
+                        best_veh    = vid
+                        best_rem    = vs["remaining"]
+                        best_travel = travel_min
+
+                if best_rem is not None and best_travel is not None and best_travel > best_rem * 0.8:
+                    dep_h  = int(vehicle_last_state[best_veh]["dep_min"] // 60)
+                    dep_m  = int(vehicle_last_state[best_veh]["dep_min"] % 60)
+                    end_h  = int(vehicle_last_state[best_veh]["shift_end"] // 60)
+                    end_m  = int(vehicle_last_state[best_veh]["shift_end"] % 60)
+                    issues.append({
+                        "type": "shift_time_exhausted", "severity": "high",
+                        "field": "shift_end",
+                        "value": f"~{best_travel:.0f} min traslado, {best_rem:.0f} min restantes",
+                        "detail": (
+                            f"El vehículo más cercano completó su última visita a las "
+                            f"{dep_h:02d}:{dep_m:02d} y su turno termina a las {end_h:02d}:{end_m:02d} "
+                            f"({best_rem:.0f} min restantes). "
+                            f"Llegar a este nodo toma ~{best_travel:.0f} min — "
+                            f"insuficiente para alcanzarlo a tiempo."
+                        ),
+                        "fix": "Ampliar el turno del vehículo o asignar un vehículo adicional a este sector.",
+                    })
+
+        # Fallback genérico
         if not issues:
             if cause_code == "EXC_SO-002":
                 issues.append({
@@ -939,6 +1013,13 @@ def analyze(req: dict, res: dict) -> dict:
             })
 
     issue_recs = [
+        ("shift_time_exhausted",
+         "Turno insuficiente para cubrir todas las visitas",
+         "El vehículo agotó su turno antes de poder llegar a estos nodos. "
+         "Están demasiado lejos del último punto visitado dado el tiempo restante. "
+         "Ampliar el turno o asignar un vehículo adicional al sector.",
+         1, "#ef4444", "shift_end"),
+
         ("tight_window",
          "Ampliar ventanas iguales a la duración de servicio",
          "La ventana de tiempo es exactamente igual a la duración de servicio, "
