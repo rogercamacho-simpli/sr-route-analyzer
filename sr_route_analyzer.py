@@ -34,7 +34,7 @@ st.markdown("""
         color: inherit !important;
     }
     [data-testid="stFileUploader"] section {
-        background: white !important;
+        background: transparent !important;
         border: 1.5px dashed #d1d5db !important;
         border-radius: 10px !important;
     }
@@ -1469,13 +1469,13 @@ def render_preflight_issue(issue):
                 extra_str = " | ".join(extras)
                 rows += (
                     f"<tr>"
-                    f"<td style='padding:3px 8px;font-family:monospace;font-size:11px;color:#374151'>{n.get('ident','')}</td>"
-                    f"<td style='padding:3px 8px;font-size:11px;color:#6b7280'>{n.get('address','')}</td>"
-                    f"<td style='padding:3px 8px;font-size:11px;color:#9ca3af'>{extra_str}</td>"
+                    f"<td style='padding:3px 8px;font-family:monospace;font-size:11px;color:inherit'>{n.get('ident','')}</td>"
+                    f"<td style='padding:3px 8px;font-size:11px;opacity:0.7;color:inherit'>{n.get('address','')}</td>"
+                    f"<td style='padding:3px 8px;font-size:11px;opacity:0.6;color:inherit'>{extra_str}</td>"
                     f"</tr>"
                 )
             else:
-                rows += f"<tr><td style='padding:3px 8px;font-family:monospace;font-size:11px;color:#374151'>{n}</td></tr>"
+                rows += f"<tr><td style='padding:3px 8px;font-family:monospace;font-size:11px;color:inherit'>{n}</td></tr>"
         if rows:
             nodes_html = (
                 f"<table style='margin-top:8px;width:100%;border-collapse:collapse;"
@@ -1487,10 +1487,10 @@ def render_preflight_issue(issue):
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span class="badge" style="background:{sev_color}20;color:{sev_color}">{sev_label}</span>
             <span class="badge badge-gray"><code style="background:transparent">{issue['code']}</code></span>
-            <strong style="font-size:14px;color:#1a1d2e">{issue['title']}</strong>
+            <strong style="font-size:14px;color:inherit">{issue['title']}</strong>
         </div>
-        <div style="font-size:13px;color:#4b5563;line-height:1.55">{issue['detail']}</div>
-        <div style="font-size:11px;color:#6b7280;margin-top:6px;">
+        <div style="font-size:13px;line-height:1.55">{issue['detail']}</div>
+        <div style="font-size:11px;opacity:0.7;margin-top:6px;">
             Campo: <code>{issue['field']}</code> = <code>{issue['value']}</code>
             &nbsp;|&nbsp; ✏️ {issue['fix']}
         </div>
