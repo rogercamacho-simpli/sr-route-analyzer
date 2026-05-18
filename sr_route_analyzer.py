@@ -580,6 +580,76 @@ def validate_request(req: dict) -> list:
                 "nodes": exceeds_shift,
             })
 
+    # ── min_load imposible — carga total de nodos insuficiente ───────────────
+    total_load   = sum(n.get("load",   0) or 0 for n in nodes)
+    total_load_2 = sum(n.get("load_2", 0) or 0 for n in nodes)
+    total_load_3 = sum(n.get("load_3", 0) or 0 for n in nodes)
+
+    for v in req.get("vehicles", []):
+        vid = v.get("ident", "?")
+        blocked = []
+
+        ml1 = v.get("min_load",   0) or 0
+        ml2 = v.get("min_load_2", 0) or 0
+        ml3 = v.get("min_load_3", 0) or 0
+
+        if ml1 > 0 and total_load < ml1:
+            blocked.append(f"load total={total_load:.1f} < min_load={ml1}")
+        if ml2 > 0 and total_load_2 < ml2:
+            blocked.append(f"load_2 total={total_load_2:.1f} < min_load_2={ml2}")
+        if ml3 > 0 and total_load_3 < ml3:
+            blocked.append(f"load_3 total={total_load_3:.1f} < min_load_3={ml3}")
+
+        if blocked:
+            issues.append({
+                "code": "MIN_LOAD_IMPOSSIBLE", "severity": "critical",
+                "field": "min_load / min_load_2 / min_load_3",
+                "value": f"vehículo {vid}",
+                "title": f"Vehículo {vid} nunca puede cumplir su carga mínima",
+                "detail": (
+                    f"El vehículo {vid} tiene requisitos de carga mínima que superan "
+                    f"la carga total disponible en todos los nodos: {' | '.join(blocked)}. "
+                    f"Este vehículo quedará inactivo — el router no generará ninguna ruta para él."
+                ),
+                "fix": (
+                    "Reducir min_load/min_load_2/min_load_3 del vehículo, "
+                    "o agregar más nodos con carga suficiente."
+                ),
+                "nodes": [],
+            })
+
+    # ── Skills opcionales sin vehículo — detectar en pre-vuelo ───────────────
+    all_veh_skills = set()
+    for v in req.get("vehicles", []):
+        all_veh_skills.update(v.get("skills", []))
+
+    missing_opt_skills = {}
+    for n in nodes:
+        for s in n.get("skills_optional", []):
+            if s not in all_veh_skills:
+                if s not in missing_opt_skills:
+                    missing_opt_skills[s] = []
+                missing_opt_skills[s].append({
+                    "ident":   n.get("ident", "?"),
+                    "address": n.get("address", "")[:55],
+                })
+
+    if missing_opt_skills:
+        for skill, affected_nodes in missing_opt_skills.items():
+            issues.append({
+                "code": "W02102", "severity": "high",
+                "field": "skills_optional",
+                "value": f"skill {skill} — {len(affected_nodes)} nodo(s)",
+                "title": f"Skill opcional {skill} sin vehículo asignado ({len(affected_nodes)} nodo(s))",
+                "detail": (
+                    f"{len(affected_nodes)} nodo(s) tienen skills_optional=[{skill}] pero "
+                    f"ningún vehículo tiene esa skill. Con visit_joiner activo y match_skills=true, "
+                    f"estos nodos serán filtrados antes de optimizar (W02102)."
+                ),
+                "fix": f"Agregar la skill {skill} a al menos un vehículo, o desactivar match_skills en visit_joiner.",
+                "nodes": affected_nodes[:15],
+            })
+
     return issues
 
 
@@ -596,6 +666,11 @@ def analyze_filtered_nodes(req: dict, res: dict) -> list:
     for fn in filtered:
         ident    = fn["ident"]
         codes    = fn.get("cause", {}).get("codes", [])
+        # Also handle W02102 format with nested details
+        if not codes and "cause" in fn:
+            cause = fn["cause"]
+            if isinstance(cause, dict):
+                codes = cause.get("codes", [])
         req_node = node_map.get(ident, {})
         nlat     = fn.get("lat") or req_node.get("lat")
         nlon     = fn.get("lon") or req_node.get("lon")
