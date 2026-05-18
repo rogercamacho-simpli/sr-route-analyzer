@@ -207,7 +207,61 @@ ERROR_CODE_MESSAGES = {
 # DETECTION ENGINE — fuente única de verdad
 # ─────────────────────────────────────────────────────────────────────────────
 
-def collect_all_issues(req: dict, res: dict) -> List[Issue]:
+def build_explained_map(preflight_issues: List[Issue], nodes: list, all_veh_skills: set, vehicles_no_zone: list, all_veh_zones: set, autozone: bool) -> dict:
+    """
+    Mapea ident de nodo → Issue de pre-vuelo que lo explica.
+    Evita que nodos sin atender caigan al fallback cuando ya existe una causa sistémica detectada.
+    Agregar nuevas reglas aquí para extender la propagación.
+    """
+    explained = {}
+
+    for issue in preflight_issues:
+        code = issue.code
+
+        # Skills opcionales faltantes → afecta nodos con esa skill
+        if code == "W02102":
+            try:
+                skill = int(issue.value.replace("skill ","").strip())
+                for n in nodes:
+                    if skill in n.get("skills_optional",[]) and n["ident"] not in explained:
+                        explained[n["ident"]] = issue
+            except Exception:
+                pass
+
+        # min_load imposible → afecta todos los nodos (el vehículo nunca sale)
+        elif code == "MIN_LOAD_IMPOSSIBLE":
+            for n in nodes:
+                if n["ident"] not in explained:
+                    explained[n["ident"]] = issue
+
+        # Nodos sin zona con vehículos zonados
+        elif code == "NODES_NO_ZONE":
+            for n in nodes:
+                if not n.get("zones") and n["ident"] not in explained:
+                    explained[n["ident"]] = issue
+
+        # Zonas sin cobertura
+        elif code == "E03004":
+            for n in nodes:
+                if n.get("zones") and n["ident"] not in explained:
+                    explained[n["ident"]] = issue
+
+        # Capacidad excedida
+        elif code == "E03002":
+            for a in issue.affected:
+                if a["ident"] not in explained:
+                    explained[a["ident"]] = issue
+
+        # Turno sin solapamiento
+        elif code == "E03005":
+            for n in nodes:
+                if n["ident"] not in explained:
+                    explained[n["ident"]] = issue
+
+    return explained
+
+
+
     issues: List[Issue] = []
     nodes    = req.get("nodes", [])
     vehicles = req.get("vehicles", [])
@@ -488,14 +542,12 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
             "Los vehículos están demasiado lejos para alcanzar estos nodos dentro del turno disponible.",
             "Verificar que el punto de inicio de los vehículos esté en la misma zona que las visitas.",
             w00001_f))
-    if other_f:
-        issues.append(Issue("FILTERED_OTHER","filtered","medium",
-            f"{len(other_f)} nodo(s) filtrados antes de optimizar (causa no identificada)",
-            "El router los eliminó en el pre-procesamiento por razones no específicas.",
-            "Revisar la configuración de estos nodos.",
-            other_f))
+    # FILTERED_OTHER eliminado — no aporta valor cuando la causa ya está en pre-vuelo
 
     # ─── 3. UNATTENDED ───────────────────────────────────────────────────────
+    # Construir mapa de nodos explicados por pre-vuelo
+    pf_issues_so_far = [i for i in issues if i.scope == "preflight"]
+    explained_map = build_explained_map(pf_issues_so_far, nodes, all_veh_skills, vehicles_no_zone, all_veh_zones, autozone)
     zone_nodes = defaultdict(list)
     for n in nodes:
         z_list = n.get("zones",[])
@@ -515,6 +567,8 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
                 zone_overflow.add(z)
 
     cause_groups: dict = defaultdict(list)
+    explained_groups: dict = defaultdict(list)  # preflight_code -> [nodes]
+
     for un in unattended:
         ident      = un["ident"]
         req_node   = node_map.get(ident,{})
@@ -525,6 +579,12 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
         ws_m, we_m = parse_time(ws), parse_time(we)
         addr       = req_node.get("address","")[:60]
         info       = {"ident":ident,"address":addr,"extra":f"load={un.get('load',0):.1f} | dur={dur} | {ws}–{we}"}
+
+        # Si el pre-vuelo ya explica por qué este nodo quedó fuera, usamos esa causa
+        if ident in explained_map:
+            pf_issue = explained_map[ident]
+            explained_groups[pf_issue.code].append((info, pf_issue))
+            continue
 
         detected = None
         if ws==we and dur and dur>0:
@@ -557,6 +617,20 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
             detected = "exc_so_002" if cause_code=="EXC_SO-002" else "exc_so_001" if cause_code=="EXC_SO-001" else "cap_time_general"
 
         cause_groups[detected].append(info)
+
+    # Nodos explicados por pre-vuelo → un Issue por causa sistémica
+    for pf_code, nodes_and_issues in explained_groups.items():
+        pf_issue  = nodes_and_issues[0][1]
+        aff_nodes = [n for n, _ in nodes_and_issues]
+        issues.append(Issue(
+            code    = f"PREFLIGHT_{pf_code}",
+            scope   = "unattended",
+            severity= pf_issue.severity,
+            title   = f"{pf_issue.title} — {len(aff_nodes)} nodo(s) sin atender",
+            why     = pf_issue.why,
+            action  = pf_issue.action,
+            affected= aff_nodes,
+        ))
 
     defs = {
         "zero_window":   ("critical","Ventana de 0 minutos — imposible agendar la visita",
@@ -879,11 +953,10 @@ def main():
                       "Estado":"🟢 Activo" if visits>0 else "⚪ Inactivo"})
     st.dataframe(pd.DataFrame(vrows), use_container_width=True, hide_index=True)
 
-    # ── Comparative ───────────────────────────────────────────────────────────
+    # ── Comparative — solo si hay diferenciador real ──────────────────────────
     r_nodes = [node_map[i] for i in routed_ids if i in node_map]
     u_nodes = [node_map[u["ident"]] for u in unattended if u["ident"] in node_map]
     if r_nodes and u_nodes:
-        st.markdown('<div class="section-title">🔬 Análisis comparativo</div>', unsafe_allow_html=True)
         def win_min(n):
             try:
                 ws,we = n.get("window_start",""), n.get("window_end","")
@@ -894,25 +967,28 @@ def main():
 
         r_l = [n.get("load",0) for n in r_nodes]
         u_l = [n.get("load",0) for n in u_nodes]
-        r_d = [d for n in r_nodes if (d:=try_int(n.get("duration"))) is not None]
-        u_d = [d for n in u_nodes if (d:=try_int(n.get("duration"))) is not None]
         r_w = [w for n in r_nodes if (w:=win_min(n)) is not None]
         u_w = [w for n in u_nodes if (w:=win_min(n)) is not None]
 
-        st.dataframe(pd.DataFrame([
-            {"Campo":"Nodos","Enrutados":len(r_nodes),"Sin atender":len(u_nodes),"Diferencia":"—"},
-            {"Campo":"Load promedio","Enrutados":avg(r_l),"Sin atender":avg(u_l),
-             "Diferencia":f"{avg(r_l)/max(avg(u_l),0.01):.1f}×" if avg(u_l)>0 else "—"},
-            {"Campo":"Duration promedio","Enrutados":f"{avg(r_d)} min","Sin atender":f"{avg(u_d)} min","Diferencia":"—"},
-            {"Campo":"Ventana promedio","Enrutados":f"{avg(r_w)} min","Sin atender":f"{avg(u_w)} min","Diferencia":"—"},
-        ]), use_container_width=True, hide_index=True)
+        load_ratio = avg(r_l)/max(avg(u_l),0.01) if avg(u_l)>0 else 1
+        win_ratio  = avg(r_w)/max(avg(u_w),0.01)  if avg(u_w)>0 else 1
+        has_differentiator = load_ratio > 2.0 or win_ratio > 1.5
 
-        if avg(r_l)>0 and avg(u_l)>0 and avg(r_l)/max(avg(u_l),0.01)>2:
-            ratio = avg(r_l)/max(avg(u_l),0.01)
-            st.info(f"🔍 **Diferenciador — Carga:** Los nodos enrutados tienen {ratio:.1f}× más carga ({avg(r_l):.0f} vs {avg(u_l):.0f}). El router priorizó los de mayor carga.")
-        elif avg(r_w)>0 and avg(u_w)>0 and avg(r_w)/max(avg(u_w),0.01)>1.5:
-            ratio = avg(r_w)/max(avg(u_w),0.01)
-            st.info(f"🔍 **Diferenciador — Ventana:** Los nodos enrutados tienen ventanas {ratio:.1f}× más amplias ({avg(r_w):.0f} vs {avg(u_w):.0f} min).")
+        if has_differentiator:
+            r_d = [d for n in r_nodes if (d:=try_int(n.get("duration"))) is not None]
+            u_d = [d for n in u_nodes if (d:=try_int(n.get("duration"))) is not None]
+            st.markdown('<div class="section-title">🔬 Análisis comparativo</div>', unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame([
+                {"Campo":"Nodos","Enrutados":len(r_nodes),"Sin atender":len(u_nodes),"Diferencia":"—"},
+                {"Campo":"Load promedio","Enrutados":avg(r_l),"Sin atender":avg(u_l),
+                 "Diferencia":f"{load_ratio:.1f}×"},
+                {"Campo":"Duration promedio","Enrutados":f"{avg(r_d)} min","Sin atender":f"{avg(u_d)} min","Diferencia":"—"},
+                {"Campo":"Ventana promedio","Enrutados":f"{avg(r_w)} min","Sin atender":f"{avg(u_w)} min","Diferencia":"—"},
+            ]), use_container_width=True, hide_index=True)
+            if load_ratio > 2.0:
+                st.info(f"🔍 **Diferenciador — Carga:** Los nodos enrutados tienen {load_ratio:.1f}× más carga ({avg(r_l):.0f} vs {avg(u_l):.0f}). El router priorizó los de mayor carga.")
+            elif win_ratio > 1.5:
+                st.info(f"🔍 **Diferenciador — Ventana:** Los nodos enrutados tienen ventanas {win_ratio:.1f}× más amplias ({avg(r_w):.0f} vs {avg(u_w):.0f} min).")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div style="font-size:11px;opacity:0.4;text-align:center">SimpliRoute Route Analyzer v3 · Issue Registry centralizado</div>', unsafe_allow_html=True)
