@@ -1,22 +1,16 @@
 """
-SimpliRoute — Route Analyzer v2
-Analiza request.json + response.json del router:
-- Validación pre-vuelo del request
-- Detección de errores E500
-- Análisis de nodos filtrados (W00001, distancia geográfica)
-- Diagnóstico de nodos sin atender
-- Detección de max_visit como causa de exclusión
-- Recomendaciones priorizadas con mensajes claros
+SimpliRoute — Route Analyzer v3
+Arquitectura centralizada: Issue Registry como fuente única de verdad.
+Mensajes con estructura: Causa → Por qué → Acción para el cliente.
 """
 
 import streamlit as st
-import json
-import math
-import io
+import json, re, math, io
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 st.set_page_config(
     page_title="SR Route Analyzer",
@@ -29,1575 +23,677 @@ st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: transparent; }
     .stMarkdown div, .stMarkdown p, .stMarkdown span { color: inherit !important; }
-    .metric-val, .metric-lbl, .rec-title, .rec-detail, .rec-field,
-    .section-title, .upload-label, .main-header, .sub-header {
-        color: inherit !important;
-    }
     [data-testid="stFileUploader"] section {
         background: transparent !important;
-        border: 1.5px dashed #d1d5db !important;
+        border: 1.5px dashed rgba(128,128,128,0.4) !important;
         border-radius: 10px !important;
     }
-    [data-testid="stFileUploader"] section:hover { border-color: #6366f1 !important; }
-    .main-header { font-size: 26px; font-weight: 700; margin-bottom: 0; color: inherit; }
-    .sub-header  { font-size: 14px; margin-top: 4px; margin-bottom: 1.5rem; color: inherit; }
-    .upload-label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: inherit; }
-    .metric-card {
-        border-radius: 12px; padding: 18px 20px;
-        border: 1px solid rgba(128,128,128,0.25); margin-bottom: 0;
-    }
-    .metric-val { font-size: 28px; font-weight: 700; line-height: 1.1; color: inherit; }
-    .metric-lbl { font-size: 12px; margin-top: 4px; color: inherit; }
-    .rec-card {
-        border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 12px; border: 1px solid rgba(128,128,128,0.25);
-    }
-    .rec-title  { font-size: 15px; font-weight: 600; margin-bottom: 6px; color: inherit; }
-    .rec-detail { font-size: 13px; line-height: 1.55; color: inherit; }
-    .rec-field  { font-size: 11px; margin-top: 8px; color: inherit; }
     .badge {
         display: inline-block; padding: 2px 10px; border-radius: 20px;
         font-size: 11px; font-weight: 600; margin-right: 6px;
         border: 1px solid currentColor;
     }
-    .badge-red   { background: rgba(220,38,38,0.12);  color: #ef4444; }
-    .badge-amber { background: rgba(245,158,11,0.12); color: #f59e0b; }
-    .badge-blue  { background: rgba(59,130,246,0.12); color: #60a5fa; }
-    .badge-gray  { background: rgba(107,114,128,0.12);color: #9ca3af; }
-    .badge-green { background: rgba(22,163,74,0.12);  color: #4ade80; }
+    .badge-red    { background: rgba(220,38,38,0.12);  color: #ef4444; }
+    .badge-amber  { background: rgba(245,158,11,0.12); color: #f59e0b; }
+    .badge-blue   { background: rgba(59,130,246,0.12); color: #60a5fa; }
+    .badge-gray   { background: rgba(107,114,128,0.12);color: #9ca3af; }
+    .badge-green  { background: rgba(22,163,74,0.12);  color: #4ade80; }
+    .issue-card {
+        border-radius: 12px; padding: 16px 20px; margin-bottom: 10px;
+        border-left: 4px solid; border-top: 1px solid rgba(128,128,128,0.2);
+        border-right: 1px solid rgba(128,128,128,0.2);
+        border-bottom: 1px solid rgba(128,128,128,0.2);
+    }
+    .issue-title  { font-size: 14px; font-weight: 700; margin-bottom: 6px; color: inherit; }
+    .issue-why    { font-size: 13px; margin-bottom: 6px; color: inherit; line-height: 1.5; }
+    .issue-action { font-size: 12px; font-style: italic; color: inherit; }
+    .summary-card {
+        border-radius: 12px; padding: 18px 22px; margin-bottom: 1.5rem;
+        border: 1px solid rgba(128,128,128,0.25);
+    }
+    .summary-title { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: inherit; }
+    .summary-line  { font-size: 14px; margin-bottom: 4px; color: inherit; }
+    .metric-card {
+        border-radius: 12px; padding: 16px 18px;
+        border: 1px solid rgba(128,128,128,0.25); margin-bottom: 0;
+    }
+    .metric-val { font-size: 26px; font-weight: 700; line-height: 1.1; }
+    .metric-lbl { font-size: 12px; margin-top: 4px; color: inherit; }
     .section-title { font-size: 16px; font-weight: 600; margin: 1.5rem 0 .75rem; color: inherit; }
     .error-banner {
         background: rgba(220,38,38,0.1); border: 1.5px solid rgba(220,38,38,0.4);
         border-radius: 12px; padding: 20px 24px; margin-bottom: 1.5rem;
     }
     .error-title { font-size: 18px; font-weight: 700; color: #ef4444; margin-bottom: 6px; }
-    .preflight-card {
-        border-radius: 12px; padding: 18px 20px;
-        margin-bottom: 10px; border: 1px solid rgba(128,128,128,0.25);
-    }
-    .preflight-ok {
-        background: rgba(22,163,74,0.1); border: 1px solid rgba(22,163,74,0.3);
-        border-radius: 12px; padding: 14px 18px; margin-bottom: 10px;
-        font-size: 13px; color: #4ade80; font-weight: 500;
-    }
     hr.divider { border: none; border-top: 1px solid rgba(128,128,128,0.2); margin: 1.5rem 0; }
     code { background: rgba(128,128,128,0.15); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+    .node-table { width:100%; border-collapse:collapse; margin-top:10px; }
+    .node-table td { padding:3px 8px; font-size:12px; border-bottom:1px solid rgba(128,128,128,0.1); }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ISSUE MODEL
+# ─────────────────────────────────────────────────────────────────────────────
+
+SEV_COLOR    = {"critical":"#ef4444","high":"#f59e0b","medium":"#3b82f6","low":"#6b7280"}
+SEV_LABEL    = {"critical":"🔴 Crítico","high":"🟡 Alto","medium":"🔵 Medio","low":"⚪ Bajo"}
+SEV_PRIORITY = {"critical":0,"high":1,"medium":2,"low":3}
+BADGE_CLASS  = {"critical":"badge-red","high":"badge-amber","medium":"badge-blue","low":"badge-gray"}
+SCOPE_ORDER  = {"preflight":0,"filtered":1,"unattended":2,"fleet":3}
+
+@dataclass
+class Issue:
+    code:     str
+    scope:    str
+    severity: str
+    title:    str
+    why:      str
+    action:   str
+    affected: List[dict] = field(default_factory=list)
+    value:    str = ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def try_int(val):
-    try:
-        return int(str(val))
-    except Exception:
-        return None
-
-def parse_time(t):
-    if not t:
-        return None
-    try:
-        h, m = str(t).split(":")
-        return int(h) * 60 + int(m)
-    except Exception:
-        return None
-
-def time_overlap(ws1, we1, ws2, we2):
-    s1, e1 = parse_time(ws1), parse_time(we1)
-    s2, e2 = parse_time(ws2), parse_time(we2)
-    if None in (s1, e1, s2, e2):
-        return True
-    return s1 <= e2 and s2 <= e1
-
-def haversine_km(lat1, lon1, lat2, lon2):
-    R = 6371
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp = math.radians(lat2 - lat1)
-    dl = math.radians(lon2 - lon1)
-    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-def detect_outliers_iqr(values):
-    arr = [v for v in values if v is not None and v > 0]
-    if len(arr) < 4:
-        return set()
-    q1 = np.percentile(arr, 25)
-    q3 = np.percentile(arr, 75)
-    iqr = q3 - q1
-    # Multiplier 3.0 (vs standard 1.5) to avoid false positives
-    # Only flag extreme outliers, not legitimate variation
-    if iqr == 0:
-        return set()
-    upper = q3 + 3.0 * iqr
-    return {v for v in arr if v > upper}
-
-def format_time_min(minutes):
-    if minutes is None:
-        return "N/A"
-    return f"{int(minutes // 60)}h {int(minutes % 60):02d}m"
-
-def parse_upload(file) -> dict:
-    """
-    Parsea un archivo subido. Soporta:
-    - JSON puro (.json o .txt)
-    - Formato curl con --data-raw '...' o --data '...'
-    """
-    content = file.read().decode("utf-8", errors="replace").strip()
-
-    # Intento 1: JSON directo
+def parse_upload(f) -> dict:
+    content = f.read().decode("utf-8", errors="replace").strip()
     try:
         return json.loads(content)
     except Exception:
         pass
-
-    # Intento 2: curl con --data-raw o --data
-    import re
-    patterns = [
-        r"--data-raw\s+'(.*)'$",
-        r'--data-raw\s+"(.*)"$',
-        r"--data\s+'(.*)'$",
-        r'--data\s+"(.*)"$',
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, content, re.DOTALL)
-        if match:
+    for pat in [r"--data-raw\s+'(.*)'$", r'--data-raw\s+"(.*)"$']:
+        m = re.search(pat, content, re.DOTALL)
+        if m:
             try:
-                return json.loads(match.group(1))
+                return json.loads(m.group(1))
             except Exception:
                 pass
-
-    # Intento 3: buscar primer { hasta el último } (JSON embebido)
-    start = content.find("{")
-    end   = content.rfind("}")
-    if start != -1 and end != -1 and end > start:
+    s, e = content.find("{"), content.rfind("}")
+    if s != -1 and e != -1:
         try:
-            return json.loads(content[start:end+1])
+            return json.loads(content[s:e+1])
         except Exception:
             pass
-
     raise ValueError("No se pudo parsear el archivo. Asegúrate de que sea JSON o formato curl.")
 
+def parse_time(t) -> Optional[int]:
+    if not t:
+        return None
+    try:
+        h, m = str(t).split(":")
+        return int(h)*60 + int(m)
+    except Exception:
+        return None
 
-def is_error_response(res):
-    # Formato E500: {"errors": [...]}
+def try_int(v) -> Optional[int]:
+    try:
+        return int(str(v))
+    except Exception:
+        return None
+
+def haversine_km(lat1, lon1, lat2, lon2) -> float:
+    R = 6371
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin(math.radians(lat2-lat1)/2)**2 + \
+        math.cos(p1)*math.cos(p2)*math.sin(math.radians(lon2-lon1)/2)**2
+    return R*2*math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+def detect_outliers_iqr(values) -> set:
+    arr = [v for v in values if v is not None and v > 0]
+    if len(arr) < 4:
+        return set()
+    q1, q3 = np.percentile(arr, 25), np.percentile(arr, 75)
+    iqr = q3 - q1
+    if iqr == 0:
+        return set()
+    return {v for v in arr if v > q3 + 3.0*iqr}
+
+def time_overlap(ws1, we1, ws2, we2) -> bool:
+    s1,e1 = parse_time(ws1), parse_time(we1)
+    s2,e2 = parse_time(ws2), parse_time(we2)
+    if None in (s1,e1,s2,e2):
+        return True
+    return s1 <= e2 and s2 <= e1
+
+def is_error_response(res) -> bool:
     if "errors" in res and "vehicles" not in res:
         return True
-    # Formato E03XXX/E01XXX/E02XXX/E99XXX: {"description": "...", "cause": {"code": "..."}}
     if "description" in res and "cause" in res and "vehicles" not in res:
         return True
     return False
 
-# Mensajes legibles por código de error de la documentación
-ERROR_CODE_MESSAGES = {
-    "E01004": ("Duración de descanso incompatible con el turno del vehículo",
-               "La ventana de descanso combinada con su duración no es compatible con el turno del vehículo.",
-               "Ajustar rest_time_start, rest_time_end o rest_time_duration para que quepan dentro del turno."),
-    "E01005": ("Ventana de descanso fuera del turno del vehículo",
-               "La ventana horaria de descanso no intersecta con el turno del vehículo. "
-               "El router no puede programar el descanso porque está fuera de la jornada.",
-               "Corregir rest_time_start y rest_time_end para que estén dentro del shift_start y shift_end del vehículo."),
-    "E03001": ("Carga total de nodos insuficiente",
-               "La suma de carga de todos los nodos es menor que la carga mínima × capacidad de los vehículos. "
-               "El router no genera rutas porque no hay suficiente carga para justificarlas.",
-               "Revisar el campo min_load de los vehículos o agregar más nodos."),
-    "E03002": ("Carga de nodos excede la capacidad de todos los vehículos",
-               "Hay nodos cuya carga individual supera la capacidad de cualquier vehículo disponible. "
-               "Ningún vehículo puede atenderlos.",
-               "Aumentar la capacidad de los vehículos o dividir la carga de los nodos."),
-    "E03003": ("Ningún vehículo tiene las skills requeridas por los nodos",
-               "Todos los nodos piden skills específicas y ningún vehículo las tiene asignadas. "
-               "El router no puede generar ninguna ruta.",
-               "Asignar las skills requeridas a al menos un vehículo."),
-    "E03004": ("Ningún vehículo cubre las zonas asignadas a los nodos",
-               "Todos los nodos tienen zona asignada pero ningún vehículo cubre esas zonas. "
-               "El router no puede generar ninguna ruta (aplica cuando autoZone=false).",
-               "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true."),
-    "E03005": ("Ningún vehículo tiene turno compatible con las ventanas de los nodos",
-               "Para todas las visitas, no existe un vehículo con horario disponible.",
-               "Revisar que los turnos de los vehículos (shift_start/shift_end) se solapen con las ventanas de los nodos."),
-    "E03006": ("Ningún vehículo tiene turno compatible (longRoutes=true)",
-               "Para todas las visitas, no existe un vehículo con horario disponible en formato de horas extendidas.",
-               "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos."),
-    "E99001": ("Visita con más de una zona asignada",
-               "Una o más visitas tienen más de una zona asignada. Solo se permite una zona por visita.",
-               "Corregir el campo zones de los nodos para que tenga máximo un valor."),
-    "E99002": ("Features de optimización incompatibles",
-               "Se están usando dos o más configuraciones que no son compatibles entre sí.",
-               "Revisar la combinación de parámetros de optimización en el request."),
-}
+def avg(vals) -> float:
+    clean = [v for v in vals if v is not None]
+    return round(float(np.mean(clean)), 1) if clean else 0.0
 
 VALID_FMV = {1.0, 1.5, 2.0, 3.0}
 
-ISSUE_LABELS = {
-    "duration_anomaly":      ("🕐", "Duration outlier",         "badge-red"),
-    "zone_time_overflow":    ("⏱️", "Desborde de tiempo",       "badge-red"),
-    "window_shift_mismatch": ("🚫", "Ventana vs turno",         "badge-red"),
-    "narrow_window":         ("📏", "Ventana estrecha",          "badge-red"),
-    "zero_window":           ("⛔", "Ventana de 0 min",          "badge-red"),
-    "inverted_window":       ("🔄", "Ventana invertida",         "badge-red"),
-    "capacity_overflow":     ("⚖️", "Capacidad excedida",       "badge-amber"),
-    "zone_mismatch":             ("🗺️", "Zona sin vehículo",              "badge-amber"),
-    "inactive_vehicles_no_zone": ("🚛", "Vehículos inactivos sin zona",   "badge-red"),
-    "skills_mismatch":           ("🔧", "Skills faltantes",               "badge-amber"),
-    "nodes_no_zone":         ("🗺️", "Nodos sin zona",           "badge-amber"),
-    "max_visit_limit":       ("🔢", "Límite max_visit",                      "badge-amber"),
-    "tight_window":          ("⏳", "Ventana = duración",                    "badge-red"),
-    "exc_so_001":            ("🕐", "Excluido por ventana",                  "badge-red"),
-    "shift_time_exhausted":  ("🏁", "Turno insuficiente para todas las visitas", "badge-red"),
-    "clustering_preference": ("✦",  "Excluido por clustering",  "badge-gray"),
-    "capacity_time_general": ("⚠️", "Cap/tiempo general",       "badge-amber"),
-    "zero_coordinates":      ("📍", "Coordenadas (0,0)",         "badge-red"),
-    "unknown":               ("❓", "Causa desconocida",         "badge-gray"),
+ERROR_CODE_MESSAGES = {
+    "E01004": ("Duración de descanso incompatible con el turno",
+               "La ventana de descanso combinada con su duración no cabe dentro del turno del vehículo.",
+               "Ajustar rest_time_start, rest_time_end o rest_time_duration para que quepan dentro del turno."),
+    "E01005": ("Ventana de descanso fuera del turno del vehículo",
+               "La ventana horaria de descanso no intersecta con el turno. El router no puede programar el descanso.",
+               "Corregir rest_time_start y rest_time_end para que estén dentro del shift_start y shift_end."),
+    "E03001": ("Carga total de nodos insuficiente para los vehículos",
+               "La suma de carga de todos los nodos es menor que la carga mínima requerida por los vehículos.",
+               "Revisar el campo min_load de los vehículos o agregar más nodos."),
+    "E03002": ("Carga de nodos excede la capacidad de todos los vehículos",
+               "Hay nodos cuya carga individual supera la capacidad de cualquier vehículo disponible.",
+               "Aumentar la capacidad de los vehículos o dividir la carga de esos nodos."),
+    "E03003": ("Ningún vehículo tiene las skills requeridas por los nodos",
+               "Todos los nodos piden skills específicas y ningún vehículo las tiene asignadas.",
+               "Asignar las skills faltantes a al menos un vehículo."),
+    "E03004": ("Ningún vehículo cubre las zonas asignadas a los nodos",
+               "Todos los nodos tienen zona asignada pero ningún vehículo cubre esas zonas (autoZone=false).",
+               "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true."),
+    "E03005": ("Ningún vehículo tiene turno compatible con las ventanas de los nodos",
+               "Para todas las visitas, no existe un vehículo con horario disponible.",
+               "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos."),
+    "E99001": ("Visita con más de una zona asignada",
+               "Una o más visitas tienen más de una zona. Solo se permite una zona por visita.",
+               "Corregir el campo zones de los nodos para que tenga máximo un valor."),
+    "E99002": ("Configuraciones de optimización incompatibles",
+               "Se están usando parámetros que no son compatibles entre sí.",
+               "Revisar la combinación de parámetros en el request."),
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PRE-FLIGHT VALIDATION
+# DETECTION ENGINE — fuente única de verdad
 # ─────────────────────────────────────────────────────────────────────────────
 
-def validate_request(req: dict) -> list:
-    issues = []
+def collect_all_issues(req: dict, res: dict) -> List[Issue]:
+    issues: List[Issue] = []
+    nodes    = req.get("nodes", [])
+    vehicles = req.get("vehicles", [])
+    node_map = {n["ident"]: n for n in nodes}
+    veh_map  = {v["ident"]: v for v in vehicles}
+    unattended = res.get("unattendedClientsNodes", [])
+    filtered   = res.get("filteredClientsNodes",   [])
+    autozone   = req.get("autoZone", False)
+    beauty_on  = req.get("beauty", True)
 
-    # fmv (E02005)
+    # ── Build routed set + vehicle last state ─────────────────────────────────
+    routed_ids       = set()
+    routed_per_veh   = {}
+    vehicle_last_state = {}
+
+    for v_res in res.get("vehicles", []):
+        vid, count = v_res["ident"], 0
+        for tour in v_res.get("tours", []):
+            real = [n for n in tour.get("nodes",[]) if not n["ident"].startswith("vehicle-")]
+            for n in real:
+                routed_ids.add(n["ident"])
+                count += 1
+            if real:
+                last  = real[-1]
+                v_req = veh_map.get(vid, {})
+                se_m  = parse_time(v_req.get("shift_end","23:59"))
+                dep_str = last.get("departure","")
+                if dep_str:
+                    try:
+                        h, m, *_ = dep_str.split(":")
+                        dep_min = int(h)*60+int(m)
+                        rn = node_map.get(last["ident"],{})
+                        if rn.get("lat") and se_m:
+                            vehicle_last_state[vid] = {
+                                "lat": rn["lat"], "lon": rn["lon"],
+                                "dep_min": dep_min, "shift_end": se_m,
+                                "remaining": se_m - dep_min,
+                            }
+                    except Exception:
+                        pass
+        routed_per_veh[vid] = count
+
+    # ── Zone / skill maps ─────────────────────────────────────────────────────
+    zone_to_vehicles = defaultdict(list)
+    all_veh_zones    = set()
+    all_veh_skills   = set()
+    vehicles_no_zone = []
+
+    for v in vehicles:
+        vid = v["ident"]
+        for z in v.get("zones",[]):
+            zone_to_vehicles[z].append(vid)
+            all_veh_zones.add(z)
+        all_veh_skills.update(v.get("skills",[]))
+        if not v.get("zones"):
+            vehicles_no_zone.append(vid)
+
+    # ── Max visit stats ───────────────────────────────────────────────────────
+    max_visit_global = None
+    vehicles_at_max  = []
+    for v in vehicles:
+        mv = v.get("max_visit")
+        if mv is not None:
+            max_visit_global = mv
+            if routed_per_veh.get(v["ident"],0) >= mv:
+                vehicles_at_max.append(v["ident"])
+
+    # ─── 1. PRE-FLIGHT ────────────────────────────────────────────────────────
+
     fmv = req.get("fmv")
     if fmv is not None and fmv not in VALID_FMV:
-        issues.append({
-            "code": "E02005", "severity": "critical",
-            "field": "fmv", "value": str(fmv),
-            "title": f"fmv={fmv} — valor no permitido",
-            "detail": (
-                f"El campo fmv tiene el valor {fmv}, que no pertenece al conjunto válido "
-                f"(1.0=Tráfico bajo, 1.5=Medio, 2.0=Alto, 3.0=Intenso). "
-                f"Puede causar un error E500 en el router."
-            ),
-            "fix": "Cambiar fmv a 1.0, 1.5, 2.0 o 3.0",
-            "nodes": [],
-        })
+        issues.append(Issue("E02005","preflight","critical",
+            f"Valor fmv={fmv} no permitido — puede causar error E500",
+            f"fmv debe ser 1.0 (bajo), 1.5 (medio), 2.0 (alto) o 3.0 (intenso). El valor {fmv} no es válido.",
+            "Cambiar fmv a uno de los valores válidos: 1.0, 1.5, 2.0 o 3.0."))
 
-    zero_window_nodes = []
-    inverted_nodes    = []
-    narrow_nodes      = []
-    zero_coord_nodes  = []
-
-    for node in req.get("nodes", []):
-        ident = node.get("ident", "?")
-        ws    = node.get("window_start", "00:00")
-        we    = node.get("window_end",   "23:59")
-        ws2   = node.get("window_start_2", "23:59")
-        we2   = node.get("window_end_2",   "23:59")
-        dur   = try_int(node.get("duration"))
-        lat   = node.get("lat", None)
-        lon   = node.get("lon", None)
-        ws_m  = parse_time(ws)
-        we_m  = parse_time(we)
-
-        if ws == we and dur and dur > 0:
-            zero_window_nodes.append({
-                "ident": ident, "address": node.get("address", "")[:55],
-                "window": f"{ws}–{we}", "duration": dur,
-            })
-        elif ws_m is not None and we_m is not None:
-            if not (ws2 == "23:59" and we2 == "23:59") and ws_m > we_m:
-                inverted_nodes.append({
-                    "ident": ident, "address": node.get("address", "")[:55],
-                    "window": f"{ws}–{we}",
-                })
-            elif dur and 0 < (we_m - ws_m) < dur:
-                narrow_nodes.append({
-                    "ident": ident, "address": node.get("address", "")[:55],
-                    "window_size": we_m - ws_m, "duration": dur,
-                })
+    zero_win, inverted, narrow, zero_coords = [], [], [], []
+    for n in nodes:
+        ident = n.get("ident","?")
+        ws, we = n.get("window_start","00:00"), n.get("window_end","23:59")
+        dur    = try_int(n.get("duration"))
+        lat, lon = n.get("lat"), n.get("lon")
+        ws_m, we_m = parse_time(ws), parse_time(we)
+        addr = n.get("address","")[:60]
+        extra_node = {"ident":ident,"address":addr,"extra":""}
 
         if lat == 0 and lon == 0:
-            zero_coord_nodes.append(ident)
+            zero_coords.append({**extra_node,"extra":"lat=0, lon=0"})
+        if ws == we and dur and dur > 0:
+            zero_win.append({**extra_node,"extra":f"ventana:{ws}–{we} | dur:{dur}min"})
+        elif ws_m and we_m:
+            if ws_m > we_m:
+                inverted.append({**extra_node,"extra":f"{ws} > {we}"})
+            elif dur and 0 < (we_m-ws_m) < dur:
+                narrow.append({**extra_node,"extra":f"ventana:{we_m-ws_m}min < dur:{dur}min"})
 
-    if zero_window_nodes:
-        issues.append({
-            "code": "ZERO_WINDOW", "severity": "high",
-            "field": "window_start / window_end",
-            "value": f"{len(zero_window_nodes)} nodo(s)",
-            "title": f"Ventana de 0 minutos con duration > 0 ({len(zero_window_nodes)} nodo(s))",
-            "detail": (
-                f"{len(zero_window_nodes)} nodo(s) tienen window_start igual a window_end "
-                f"con duration > 0. El nodo no puede ser atendido en una ventana de 0 minutos."
-            ),
-            "fix": "Ampliar window_end o establecer duration=0",
-            "nodes": zero_window_nodes,
-        })
+    if zero_coords:
+        issues.append(Issue("E02004","preflight","critical",
+            f"Coordenadas (0,0) en {len(zero_coords)} nodo(s) — el router no puede ubicarlos",
+            "Nodos con lat=0 y lon=0 son inválidos. El router los rechaza con error E02004.",
+            "Corregir las coordenadas lat/lon antes de enviar el request.",
+            zero_coords))
+    if zero_win:
+        issues.append(Issue("ZERO_WINDOW","preflight","high",
+            f"Ventana de 0 minutos en {len(zero_win)} nodo(s) — imposible atenderlos",
+            "window_start == window_end con duration > 0. No hay margen temporal para el servicio.",
+            "Ampliar window_end o establecer duration=0 en estos nodos.",
+            zero_win))
+    if inverted:
+        issues.append(Issue("E01006","preflight","high",
+            f"Ventana horaria invertida en {len(inverted)} nodo(s) — window_start > window_end",
+            "El inicio de la ventana es posterior al fin. El router las rechaza con error E01006.",
+            "Intercambiar window_start y window_end en los nodos afectados.",
+            inverted))
+    if narrow:
+        issues.append(Issue("NARROW_WINDOW","preflight","high",
+            f"Ventana más pequeña que la duración de servicio en {len(narrow)} nodo(s)",
+            "La ventana disponible es menor al tiempo necesario para completar la visita.",
+            "Ampliar window_end o reducir duration en los nodos afectados.",
+            narrow))
 
-    if inverted_nodes:
-        issues.append({
-            "code": "E01006", "severity": "high",
-            "field": "window_start / window_end",
-            "value": f"{len(inverted_nodes)} nodo(s)",
-            "title": f"Ventana invertida: window_start > window_end ({len(inverted_nodes)} nodo(s))",
-            "detail": f"{len(inverted_nodes)} nodo(s) tienen window_start posterior a window_end (E01006).",
-            "fix": "Intercambiar window_start y window_end",
-            "nodes": inverted_nodes,
-        })
-
-    if narrow_nodes:
-        issues.append({
-            "code": "NARROW_WINDOW", "severity": "high",
-            "field": "window_end / duration",
-            "value": f"{len(narrow_nodes)} nodo(s)",
-            "title": f"Ventana más pequeña que la duración de servicio ({len(narrow_nodes)} nodo(s))",
-            "detail": f"{len(narrow_nodes)} nodo(s) tienen ventana inferior a su duración de servicio.",
-            "fix": "Ampliar window_end o reducir duration",
-            "nodes": narrow_nodes,
-        })
-
-    if zero_coord_nodes:
-        issues.append({
-            "code": "E02004", "severity": "critical",
-            "field": "lat / lon",
-            "value": f"{len(zero_coord_nodes)} nodo(s)",
-            "title": f"Coordenadas (0, 0) detectadas ({len(zero_coord_nodes)} nodo(s))",
-            "detail": f"{len(zero_coord_nodes)} nodo(s) tienen lat=0 y lon=0. El router no puede ubicarlos (E02004).",
-            "fix": "Corregir las coordenadas lat/lon",
-            "nodes": zero_coord_nodes,
-        })
-
-    for v in req.get("vehicles", []):
-        ss = parse_time(v.get("shift_start", "00:01"))
-        se = parse_time(v.get("shift_end",   "23:59"))
-        if ss is not None and se is not None and ss >= se:
-            issues.append({
-                "code": "E01006_VEH", "severity": "high",
-                "field": "shift_start / shift_end",
-                "value": f"veh {v.get('ident')}",
-                "title": f"Turno inválido en vehículo {v.get('ident')}",
-                "detail": f"shift_start ({v.get('shift_start')}) ≥ shift_end ({v.get('shift_end')}).",
-                "fix": "Corregir shift_start y shift_end del vehículo",
-                "nodes": [],
-            })
-
-    # ── Checks de compatibilidad global (E03XXX) ──────────────────────────────
-    nodes    = req.get("nodes",    [])
-    vehicles = req.get("vehicles", [])
-
-    # E03004 — Zonas de nodos sin cobertura en vehículos
-    if not req.get("autoZone", False):
-        all_veh_zones = set()
-        for v in vehicles:
-            all_veh_zones.update(v.get("zones", []))
-        nodes_with_zone = [n for n in nodes if n.get("zones")]
-        if nodes_with_zone and all_veh_zones:
-            uncovered_zones = set()
-            for n in nodes_with_zone:
-                for z in n.get("zones", []):
-                    if z not in all_veh_zones:
-                        uncovered_zones.add(z)
-            if uncovered_zones:
-                count = sum(1 for n in nodes_with_zone if any(z in uncovered_zones for z in n.get("zones", [])))
-                issues.append({
-                    "code": "E03004", "severity": "critical",
-                    "field": "zones",
-                    "value": str(sorted(uncovered_zones)),
-                    "title": f"Zona(s) sin cobertura — ningún vehículo cubre {sorted(uncovered_zones)}",
-                    "detail": (
-                        f"{count} nodo(s) tienen asignada(s) la(s) zona(s) {sorted(uncovered_zones)} "
-                        f"pero ningún vehículo cubre esas zonas. El router no generará ninguna ruta (E03004)."
-                    ),
-                    "fix": "Asignar las zonas a al menos un vehículo, o activar autoZone=true.",
-                    "nodes": [],
-                })
-        elif nodes_with_zone and not all_veh_zones:
-            issues.append({
-                "code": "E03004", "severity": "critical",
-                "field": "zones",
-                "value": f"{len(nodes_with_zone)} nodo(s) con zona",
-                "title": "Todos los nodos tienen zona pero ningún vehículo tiene zona asignada",
-                "detail": (
-                    f"{len(nodes_with_zone)} nodo(s) tienen zona asignada pero los {len(vehicles)} "
-                    f"vehículo(s) tienen zones=[] . El router no generará ninguna ruta (E03004)."
-                ),
-                "fix": "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true.",
-                "nodes": [],
-            })
-
-        # Nodos sin zona con vehículos que SÍ tienen zona asignada
-        nodes_no_zone    = [n for n in nodes if not n.get("zones")]
-        vehicles_no_zone_req = [v for v in vehicles if not v.get("zones")]
-        if nodes_no_zone and all_veh_zones and not vehicles_no_zone_req:
-            issues.append({
-                "code": "NODES_NO_ZONE", "severity": "high",
-                "field": "zones (nodo)",
-                "value": f"{len(nodes_no_zone)} nodo(s) sin zona",
-                "title": f"{len(nodes_no_zone)} nodo(s) sin zona en un request donde todos los vehículos tienen zona asignada",
-                "detail": (
-                    f"{len(nodes_no_zone)} nodo(s) tienen zones=[] pero todos los vehículos tienen zona asignada. "
-                    f"Con autoZone=false, el router atiende primero los nodos de la zona del vehículo y solo "
-                    f"incluye los nodos sin zona si sobra capacidad y tiempo. Es probable que queden sin atender."
-                ),
-                "fix": (
-                    "Asignar la zona correcta a los nodos sin zona, "
-                    "o agregar un vehículo sin zona asignada (zones=[]) para que los cubra."
-                ),
-                "nodes": [{"ident": n.get("ident",""), "address": n.get("address","")[:55]} for n in nodes_no_zone[:15]],
-            })
-
-    # E03003 — Skills requeridas sin cobertura en vehículos
-    all_veh_skills = set()
     for v in vehicles:
-        all_veh_skills.update(v.get("skills", []))
-    nodes_with_skills = [n for n in nodes if n.get("skills_required") or n.get("skills_optional")]
-    if nodes_with_skills:
-        missing_skills = set()
-        for n in nodes_with_skills:
-            for s in (n.get("skills_required", []) + n.get("skills_optional", [])):
-                if s not in all_veh_skills:
-                    missing_skills.add(s)
-        if missing_skills and len(missing_skills) == len({s for n in nodes_with_skills for s in (n.get("skills_required",[]) + n.get("skills_optional",[]))}):
-            issues.append({
-                "code": "E03003", "severity": "critical",
-                "field": "skills_required / skills_optional",
-                "value": str(sorted(missing_skills)),
-                "title": f"Ningún vehículo tiene las skills requeridas por los nodos",
-                "detail": (
-                    f"Las skills {sorted(missing_skills)} son requeridas por los nodos pero "
-                    f"ningún vehículo las tiene asignadas. El router no generará ninguna ruta (E03003)."
-                ),
-                "fix": "Asignar las skills faltantes a al menos un vehículo.",
-                "nodes": [],
-            })
+        ss = parse_time(v.get("shift_start","00:01"))
+        se = parse_time(v.get("shift_end","23:59"))
+        if ss is not None and se is not None and ss >= se:
+            issues.append(Issue("E01006_VEH","preflight","high",
+                f"Turno inválido en vehículo {v['ident']} — shift_start >= shift_end",
+                f"El turno {v.get('shift_start')} – {v.get('shift_end')} no tiene duración. El vehículo nunca puede salir.",
+                "Corregir shift_start y shift_end para que el turno tenga duración positiva."))
 
-    # E03002 — Carga individual mayor que capacidad de todos los vehículos
-    max_cap1 = max((v.get("capacity",   0) or 0 for v in vehicles), default=0)
-    max_cap2 = max((v.get("capacity_2", 0) or 0 for v in vehicles), default=0)
-    max_cap3 = max((v.get("capacity_3", 0) or 0 for v in vehicles), default=0)
-    if max_cap1 < 1e15:  # ignorar capacidad ilimitada
-        overload_nodes = []
-        for n in nodes:
-            l1 = n.get("load",   0) or 0
-            l2 = n.get("load_2", 0) or 0
-            l3 = n.get("load_3", 0) or 0
-            if (max_cap1 > 0 and l1 > max_cap1) or \
-               (max_cap2 > 0 and l2 > max_cap2) or \
-               (max_cap3 > 0 and l3 > max_cap3):
-                overload_nodes.append(n.get("ident", "?"))
-        if overload_nodes:
-            issues.append({
-                "code": "E03002", "severity": "critical",
-                "field": "load / capacity",
-                "value": f"{len(overload_nodes)} nodo(s)",
-                "title": f"Carga de nodos excede la capacidad máxima de todos los vehículos ({len(overload_nodes)} nodo(s))",
-                "detail": (
-                    f"{len(overload_nodes)} nodo(s) tienen una carga que supera la capacidad del vehículo "
-                    f"más grande disponible. El router no puede asignarlos a ningún vehículo (E03002)."
-                ),
-                "fix": "Aumentar la capacidad de los vehículos o dividir la carga de los nodos.",
-                "nodes": overload_nodes[:15],
-            })
-
-    # E03005/E03006 — Ventanas de nodos sin solapamiento con ningún turno de vehículo
-    if not req.get("longRoutes", False):
-        shifts = [(parse_time(v.get("shift_start","00:01")), parse_time(v.get("shift_end","23:59"))) for v in vehicles]
-        shifts = [(s,e) for s,e in shifts if s is not None and e is not None]
-        no_overlap_nodes = []
-        for n in nodes:
-            ws = parse_time(n.get("window_start", "00:00"))
-            we = parse_time(n.get("window_end",   "23:59"))
-            if ws is None or we is None:
-                continue
-            has_overlap = any(ws <= se and ss <= we for ss, se in shifts)
-            if not has_overlap:
-                no_overlap_nodes.append({
-                    "ident":   n.get("ident", "?"),
-                    "address": n.get("address", "")[:55],
-                    "window":  f"{n.get('window_start')}–{n.get('window_end')}",
-                })
-        if no_overlap_nodes and len(no_overlap_nodes) == len(nodes):
-            issues.append({
-                "code": "E03005", "severity": "critical",
-                "field": "window_start / window_end vs shift",
-                "value": f"{len(no_overlap_nodes)} nodo(s)",
-                "title": "Ningún vehículo tiene turno compatible con las ventanas de los nodos",
-                "detail": (
-                    f"Las ventanas de tiempo de todos los nodos están fuera del turno de todos los vehículos. "
-                    f"El router no generará ninguna ruta (E03005)."
-                ),
-                "fix": "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos.",
-                "nodes": no_overlap_nodes[:15],
-            })
-
-    # E01004/E01005 — Ventana de descanso incompatible con turno (enable_rest_time=true)
-    if req.get("enable_rest_time", False):
-        no_intersect = []   # E01005: descanso completamente fuera del turno
-        exceeds_shift = []  # E01004: descanso se extiende más allá del turno
-
-        for v in req.get("vehicles", []):
-            vid = v.get("ident", "?")
-            ss  = parse_time(v.get("shift_start", "00:01"))
-            se  = parse_time(v.get("shift_end",   "23:59"))
+    if req.get("enable_rest_time"):
+        no_ix, exceeds = [], []
+        for v in vehicles:
+            vid = v.get("ident","?")
+            ss  = parse_time(v.get("shift_start","00:01"))
+            se  = parse_time(v.get("shift_end","23:59"))
             rs  = parse_time(v.get("rest_time_start"))
             re  = parse_time(v.get("rest_time_end"))
-
-            if rs is None or re is None or ss is None or se is None:
+            if None in (ss,se,rs,re):
                 continue
-
-            # E01005: sin solapamiento entre descanso y turno
+            extra = f"shift {v.get('shift_start')}–{v.get('shift_end')} | rest {v.get('rest_time_start')}–{v.get('rest_time_end')}"
             if rs >= se or re <= ss:
-                no_intersect.append({
-                    "ident":   vid,
-                    "address": f"shift {v.get('shift_start')}–{v.get('shift_end')} | rest {v.get('rest_time_start')}–{v.get('rest_time_end')}",
-                })
-            # E01004: descanso se extiende más allá del fin del turno
+                no_ix.append({"ident":vid,"address":extra,"extra":""})
             elif re > se:
-                exceeds_shift.append({
-                    "ident":   vid,
-                    "address": f"shift {v.get('shift_start')}–{v.get('shift_end')} | rest {v.get('rest_time_start')}–{v.get('rest_time_end')} (excede {re-se} min)",
-                })
+                exceeds.append({"ident":vid,"address":extra,"extra":f"excede {re-se} min"})
+        if no_ix:
+            issues.append(Issue("E01005","preflight","critical",
+                f"Ventana de descanso fuera del turno en {len(no_ix)} vehículo(s)",
+                "La ventana de descanso no intersecta con el turno. El router no puede programar el descanso (E01005).",
+                "Corregir rest_time_start y rest_time_end para que estén dentro del shift del vehículo.",
+                no_ix))
+        if exceeds:
+            issues.append(Issue("E01004","preflight","high",
+                f"Ventana de descanso se extiende más allá del turno en {len(exceeds)} vehículo(s)",
+                "rest_time_end supera shift_end. El descanso debe caber dentro del turno (E01004).",
+                "Ajustar rest_time_end para que no supere shift_end.",
+                exceeds))
 
-        if no_intersect:
-            issues.append({
-                "code": "E01005", "severity": "critical",
-                "field": "rest_time_start / rest_time_end",
-                "value": f"{len(no_intersect)} vehículo(s)",
-                "title": f"Ventana de descanso fuera del turno — {len(no_intersect)} vehículo(s)",
-                "detail": (
-                    f"{len(no_intersect)} vehículo(s) tienen la ventana de descanso completamente "
-                    f"fuera de su turno. El router no puede programar el descanso (E01005) y no generará rutas."
-                ),
-                "fix": "Corregir rest_time_start y rest_time_end para que estén dentro del shift_start y shift_end.",
-                "nodes": no_intersect,
-            })
-
-        if exceeds_shift:
-            issues.append({
-                "code": "E01004", "severity": "high",
-                "field": "rest_time_end",
-                "value": f"{len(exceeds_shift)} vehículo(s)",
-                "title": f"Ventana de descanso se extiende más allá del turno — {len(exceeds_shift)} vehículo(s)",
-                "detail": (
-                    f"{len(exceeds_shift)} vehículo(s) tienen rest_time_end posterior a shift_end. "
-                    f"La ventana de descanso debe estar completamente dentro del turno (E01004)."
-                ),
-                "fix": "Ajustar rest_time_end para que no supere shift_end del vehículo.",
-                "nodes": exceeds_shift,
-            })
-
-    # ── min_load imposible — carga total de nodos insuficiente ───────────────
-    total_load   = sum(n.get("load",   0) or 0 for n in nodes)
-    total_load_2 = sum(n.get("load_2", 0) or 0 for n in nodes)
-    total_load_3 = sum(n.get("load_3", 0) or 0 for n in nodes)
-
-    for v in req.get("vehicles", []):
-        vid = v.get("ident", "?")
-        blocked = []
-
-        ml1 = v.get("min_load",   0) or 0
-        ml2 = v.get("min_load_2", 0) or 0
-        ml3 = v.get("min_load_3", 0) or 0
-
-        if ml1 > 0 and total_load < ml1:
-            blocked.append(f"load total={total_load:.1f} < min_load={ml1}")
-        if ml2 > 0 and total_load_2 < ml2:
-            blocked.append(f"load_2 total={total_load_2:.1f} < min_load_2={ml2}")
-        if ml3 > 0 and total_load_3 < ml3:
-            blocked.append(f"load_3 total={total_load_3:.1f} < min_load_3={ml3}")
-
+    total_load   = sum(n.get("load",0)   or 0 for n in nodes)
+    total_load_2 = sum(n.get("load_2",0) or 0 for n in nodes)
+    total_load_3 = sum(n.get("load_3",0) or 0 for n in nodes)
+    for v in vehicles:
+        vid, blocked = v.get("ident","?"), []
+        ml1 = v.get("min_load",  0) or 0
+        ml2 = v.get("min_load_2",0) or 0
+        ml3 = v.get("min_load_3",0) or 0
+        if ml1>0 and total_load   < ml1: blocked.append(f"load total={total_load:.1f} < min_load={ml1}")
+        if ml2>0 and total_load_2 < ml2: blocked.append(f"load_2 total={total_load_2:.1f} < min_load_2={ml2}")
+        if ml3>0 and total_load_3 < ml3: blocked.append(f"load_3 total={total_load_3:.1f} < min_load_3={ml3}")
         if blocked:
-            issues.append({
-                "code": "MIN_LOAD_IMPOSSIBLE", "severity": "critical",
-                "field": "min_load / min_load_2 / min_load_3",
-                "value": f"vehículo {vid}",
-                "title": f"Vehículo {vid} nunca puede cumplir su carga mínima",
-                "detail": (
-                    f"El vehículo {vid} tiene requisitos de carga mínima que superan "
-                    f"la carga total disponible en todos los nodos: {' | '.join(blocked)}. "
-                    f"Este vehículo quedará inactivo — el router no generará ninguna ruta para él."
-                ),
-                "fix": (
-                    "Reducir min_load/min_load_2/min_load_3 del vehículo, "
-                    "o agregar más nodos con carga suficiente."
-                ),
-                "nodes": [],
-            })
+            issues.append(Issue("MIN_LOAD_IMPOSSIBLE","preflight","critical",
+                f"Vehículo {vid} nunca puede cumplir su carga mínima — quedará inactivo",
+                f"La carga total disponible en los nodos no alcanza: {' | '.join(blocked)}.",
+                "Reducir min_load/min_load_2/min_load_3, o agregar nodos con carga suficiente."))
 
-    # ── Skills opcionales sin vehículo — detectar en pre-vuelo ───────────────
-    all_veh_skills = set()
-    for v in req.get("vehicles", []):
-        all_veh_skills.update(v.get("skills", []))
-
-    missing_opt_skills = {}
+    missing_opt = defaultdict(list)
     for n in nodes:
-        for s in n.get("skills_optional", []):
+        for s in n.get("skills_optional",[]):
             if s not in all_veh_skills:
-                if s not in missing_opt_skills:
-                    missing_opt_skills[s] = []
-                missing_opt_skills[s].append({
-                    "ident":   n.get("ident", "?"),
-                    "address": n.get("address", "")[:55],
-                })
+                missing_opt[s].append({"ident":n.get("ident","?"),"address":n.get("address","")[:55],"extra":f"skill opt: {s}"})
+    for skill, aff in missing_opt.items():
+        vj = req.get("visit_joiner",{})
+        note = " Con visit_joiner activo y match_skills=true, serán filtrados antes de optimizar (W02102)." if vj.get("enable_visit_join") and vj.get("match_skills") else ""
+        issues.append(Issue("W02102","preflight","high",
+            f"Skill opcional {skill} sin vehículo asignado — {len(aff)} nodo(s) en riesgo de ser filtrados",
+            f"Ningún vehículo tiene la skill {skill}.{note}",
+            f"Agregar la skill {skill} a al menos un vehículo, o desactivar match_skills en visit_joiner.",
+            aff))
 
-    if missing_opt_skills:
-        for skill, affected_nodes in missing_opt_skills.items():
-            issues.append({
-                "code": "W02102", "severity": "high",
-                "field": "skills_optional",
-                "value": f"skill {skill} — {len(affected_nodes)} nodo(s)",
-                "title": f"Skill opcional {skill} sin vehículo asignado ({len(affected_nodes)} nodo(s))",
-                "detail": (
-                    f"{len(affected_nodes)} nodo(s) tienen skills_optional=[{skill}] pero "
-                    f"ningún vehículo tiene esa skill. Con visit_joiner activo y match_skills=true, "
-                    f"estos nodos serán filtrados antes de optimizar (W02102)."
-                ),
-                "fix": f"Agregar la skill {skill} a al menos un vehículo, o desactivar match_skills en visit_joiner.",
-                "nodes": affected_nodes[:15],
-            })
+    if not autozone:
+        nwz = [n for n in nodes if n.get("zones")]
+        if nwz and all_veh_zones:
+            uncovered = set()
+            for n in nwz:
+                for z in n.get("zones",[]):
+                    if z not in all_veh_zones:
+                        uncovered.add(z)
+            if uncovered:
+                cnt = sum(1 for n in nwz if any(z in uncovered for z in n.get("zones",[])))
+                issues.append(Issue("E03004","preflight","critical",
+                    f"Zona(s) {sorted(uncovered)} sin vehículo — {cnt} nodo(s) serán ignorados",
+                    f"Los nodos tienen zonas {sorted(uncovered)} pero ningún vehículo las cubre. Con autoZone=false el router los ignora.",
+                    "Asignar las zonas a al menos un vehículo, o activar autoZone=true."))
+        elif nwz and not all_veh_zones:
+            issues.append(Issue("E03004","preflight","critical",
+                "Todos los nodos tienen zona pero ningún vehículo tiene zona asignada",
+                f"{len(nwz)} nodos con zona pero todos los vehículos tienen zones=[]. El router no generará rutas (E03004).",
+                "Asignar las zonas correspondientes a los vehículos, o activar autoZone=true."))
 
+        nnozone = [n for n in nodes if not n.get("zones")]
+        vnozone_req = [v for v in vehicles if not v.get("zones")]
+        if nnozone and all_veh_zones and not vnozone_req:
+            issues.append(Issue("NODES_NO_ZONE","preflight","high",
+                f"{len(nnozone)} nodo(s) sin zona — todos los vehículos tienen zona, estos quedarán rezagados",
+                "Con autoZone=false, el router prioriza nodos de zona. Los sin zona solo se atienden si sobra capacidad.",
+                "Asignar la zona correcta a los nodos, o agregar un vehículo con zones=[].",
+                [{"ident":n.get("ident","?"),"address":n.get("address","")[:55],"extra":""} for n in nnozone[:15]]))
+
+    max_cap1 = max((v.get("capacity",0) or 0 for v in vehicles), default=0)
+    if max_cap1 < 1e15:
+        overload = [{"ident":n.get("ident","?"),"address":n.get("address","")[:55],
+                     "extra":f"load={n.get('load',0):.1f} > cap_max={max_cap1}"}
+                    for n in nodes if n.get("load",0) > max_cap1]
+        if overload:
+            issues.append(Issue("E03002","preflight","critical",
+                f"Carga de {len(overload)} nodo(s) excede la capacidad de todos los vehículos",
+                f"La carga individual supera la capacidad del vehículo más grande (cap={max_cap1}). Ningún vehículo puede atenderlos.",
+                "Aumentar la capacidad de los vehículos o dividir la carga de estos nodos.",
+                overload))
+
+    if not req.get("longRoutes"):
+        shifts = [(parse_time(v.get("shift_start","00:01")), parse_time(v.get("shift_end","23:59"))) for v in vehicles]
+        shifts = [(s,e) for s,e in shifts if s and e]
+        no_ov  = [{"ident":n.get("ident","?"),"address":n.get("address","")[:55],
+                   "extra":f"ventana {n.get('window_start')}–{n.get('window_end')}"}
+                  for n in nodes
+                  if (ws_m:=parse_time(n.get("window_start","00:00"))) is not None
+                  and (we_m:=parse_time(n.get("window_end","23:59"))) is not None
+                  and not any(ws_m<=se and ss<=we_m for ss,se in shifts)]
+        if no_ov and len(no_ov)==len(nodes):
+            issues.append(Issue("E03005","preflight","critical",
+                "Ningún vehículo tiene turno compatible con las ventanas de los nodos",
+                "Las ventanas de todos los nodos están fuera del turno de todos los vehículos. No se generarán rutas (E03005).",
+                "Revisar que los turnos de los vehículos se solapen con las ventanas de los nodos.",
+                no_ov[:10]))
+
+    # ─── 2. FILTERED ─────────────────────────────────────────────────────────
+    w02102_f, w00001_f, other_f = [], [], []
+    for fn in filtered:
+        ident    = fn["ident"]
+        req_node = node_map.get(ident,{})
+        cause    = fn.get("cause",{})
+        codes    = cause.get("codes",[]) if isinstance(cause,dict) else []
+        addr     = req_node.get("address","")[:60]
+        if "W02102" in codes:
+            w02102_f.append({"ident":ident,"address":addr,"extra":f"skill opt: {req_node.get('skills_optional',[])}"})
+        elif "W00001" in codes:
+            nlat, nlon = fn.get("lat"), fn.get("lon")
+            mn = None
+            for v in vehicles:
+                vl = v.get("location_start",{})
+                if vl.get("lat") and nlat and nlon:
+                    d = haversine_km(vl["lat"],vl["lon"],nlat,nlon)
+                    if mn is None or d < mn: mn = d
+            w00001_f.append({"ident":ident,"address":addr,"extra":f"veh más cercano ~{mn:.0f}km" if mn else ""})
+        else:
+            other_f.append({"ident":ident,"address":addr,"extra":str(codes)})
+
+    if w02102_f:
+        issues.append(Issue("W02102_FILTERED","filtered","high",
+            f"{len(w02102_f)} nodo(s) filtrados — skill opcional sin vehículo asignado (W02102)",
+            "El router los eliminó antes de optimizar porque ningún vehículo tiene la skill opcional y match_skills=true.",
+            "Agregar la skill faltante a un vehículo, o desactivar match_skills en visit_joiner.",
+            w02102_f))
+    if w00001_f:
+        issues.append(Issue("W00001_FILTERED","filtered","high",
+            f"{len(w00001_f)} nodo(s) filtrados — incompatibilidad geográfica (W00001)",
+            "Los vehículos están demasiado lejos para alcanzar estos nodos dentro del turno disponible.",
+            "Verificar que el punto de inicio de los vehículos esté en la misma zona que las visitas.",
+            w00001_f))
+    if other_f:
+        issues.append(Issue("FILTERED_OTHER","filtered","medium",
+            f"{len(other_f)} nodo(s) filtrados antes de optimizar (causa no identificada)",
+            "El router los eliminó en el pre-procesamiento por razones no específicas.",
+            "Revisar la configuración de estos nodos.",
+            other_f))
+
+    # ─── 3. UNATTENDED ───────────────────────────────────────────────────────
+    zone_nodes = defaultdict(list)
+    for n in nodes:
+        z_list = n.get("zones",[])
+        zone_nodes[(z_list[0] if z_list else "sin_zona")].append(n)
+
+    zone_overflow = set()
+    zone_outliers = {}
+    for z, znodes in zone_nodes.items():
+        durs = [d for d in [try_int(n.get("duration")) for n in znodes] if d is not None]
+        zone_outliers[z] = detect_outliers_iqr(durs)
+        veh_ids = zone_to_vehicles.get(z, vehicles_no_zone if z=="sin_zona" else [])
+        if veh_ids:
+            v   = veh_map.get(veh_ids[0],{})
+            ssm = parse_time(v.get("shift_start","00:01"))
+            sem = parse_time(v.get("shift_end","23:59"))
+            if ssm and sem and sum(durs) > (sem-ssm)*len(veh_ids):
+                zone_overflow.add(z)
+
+    cause_groups: dict = defaultdict(list)
+    for un in unattended:
+        ident      = un["ident"]
+        req_node   = node_map.get(ident,{})
+        cause_code = un.get("cause",{}).get("code","")
+        nz         = req_node.get("zones",[])
+        dur        = try_int(req_node.get("duration"))
+        ws, we     = req_node.get("window_start","00:00"), req_node.get("window_end","23:59")
+        ws_m, we_m = parse_time(ws), parse_time(we)
+        addr       = req_node.get("address","")[:60]
+        info       = {"ident":ident,"address":addr,"extra":f"load={un.get('load',0):.1f} | dur={dur} | {ws}–{we}"}
+
+        detected = None
+        if ws==we and dur and dur>0:
+            detected = "zero_window"
+        elif ws_m and we_m and dur and 0<(we_m-ws_m)<dur:
+            detected = "narrow_window"
+        elif ws_m and we_m and dur and (we_m-ws_m)==dur:
+            detected = "tight_window"
+        elif dur and any(dur in zone_outliers.get(z,set()) for z in (nz if nz else ["sin_zona"])):
+            detected = "duration_outlier"
+        elif any(z in zone_overflow for z in (nz if nz else ["sin_zona"])):
+            detected = "zone_overflow"
+        elif nz and not any(time_overlap(ws,we,veh_map[v].get("shift_start","00:01"),veh_map[v].get("shift_end","23:59"))
+                            for z in nz for v in zone_to_vehicles.get(z,[]) if v in veh_map):
+            detected = "window_shift_mismatch"
+        elif nz and not autozone and vehicles_no_zone and all_veh_zones:
+            detected = "inactive_vehicles_no_zone"
+        elif not nz and not autozone and all_veh_zones and not vehicles_no_zone:
+            detected = "nodes_no_zone"
+        elif max_visit_global and vehicles_at_max:
+            detected = "max_visit_limit"
+        elif vehicle_last_state:
+            nlat, nlon = req_node.get("lat"), req_node.get("lon")
+            if nlat and nlon:
+                for vs in vehicle_last_state.values():
+                    if (haversine_km(vs["lat"],vs["lon"],nlat,nlon)/60*60)+(dur or 0) > vs["remaining"]:
+                        detected = "shift_time_exhausted"
+                        break
+        if not detected:
+            detected = "exc_so_002" if cause_code=="EXC_SO-002" else "exc_so_001" if cause_code=="EXC_SO-001" else "cap_time_general"
+
+        cause_groups[detected].append(info)
+
+    defs = {
+        "zero_window":   ("critical","Ventana de 0 minutos — imposible agendar la visita",
+            "window_start == window_end con duration > 0. No hay espacio temporal para el servicio.",
+            "Ampliar window_end o establecer duration=0 en los nodos afectados."),
+        "narrow_window": ("high","Ventana más pequeña que la duración — el servicio no cabe",
+            "La ventana disponible es menor al tiempo de servicio. Físicamente imposible atenderlos.",
+            "Ampliar window_end o reducir duration en los nodos afectados."),
+        "tight_window":  ("high","Ventana igual a la duración — sin margen para el traslado",
+            "La ventana cubre exactamente el servicio pero no deja tiempo para llegar y salir.",
+            "Ampliar window_end al menos 15–30 min más allá de la duración de servicio."),
+        "duration_outlier":("high","Duración de servicio atípica — desborda el tiempo disponible de la zona",
+            "La duration es estadísticamente anormal vs el resto de la zona y causa desborde temporal.",
+            "Verificar y corregir la duration al tiempo real de servicio."),
+        "zone_overflow": ("high","Tiempo total de servicio en la zona excede el turno disponible",
+            "La suma de durations de todos los nodos supera el tiempo total de los vehículos asignados a la zona.",
+            "Corregir durations, agregar un vehículo a la zona, o ampliar el turno."),
+        "window_shift_mismatch":("high","Ventana horaria incompatible con el turno del vehículo",
+            "La ventana del nodo no se solapa con el turno de ningún vehículo candidato.",
+            "Ajustar window_start/window_end del nodo o el shift del vehículo."),
+        "inactive_vehicles_no_zone":("high",
+            f"Vehículos inactivos — {len(vehicles_no_zone)} vehículo(s) con zones=[] no pueden atender nodos con zona",
+            f"Con autoZone=false, los vehículos sin zona asignada no pueden atender ningún nodo de zona.",
+            "Asignar las zonas correspondientes a los vehículos inactivos."),
+        "nodes_no_zone": ("medium","Nodos sin zona — atendidos solo si sobra capacidad",
+            "Con autoZone=false, el router prioriza nodos de zona. Los sin zona compiten por el sobrante.",
+            "Asignar la zona correcta a los nodos, o agregar un vehículo con zones=[]."),
+        "max_visit_limit":("medium",
+            f"Límite max_visit={max_visit_global} alcanzado — vehículos sin cupo para más visitas",
+            f"{len(vehicles_at_max)} vehículo(s) llegaron al tope aunque tienen tiempo y capacidad disponibles.",
+            f"Aumentar max_visit por encima de {max_visit_global} o redistribuir carga."),
+        "shift_time_exhausted":("high","Turno insuficiente — el vehículo no alcanza a llegar a tiempo",
+            "El vehículo más cercano ya completó su ruta y no tiene tiempo para llegar, atender y salir.",
+            "Ampliar el turno del vehículo o asignar un vehículo adicional en este sector."),
+        "exc_so_002": (
+            "low" if beauty_on else "medium",
+            "Descartado por el optimizador para mejorar la calidad global de las rutas" if not beauty_on
+            else "Descartado por beauty=true — el router priorizó rutas más agrupadas",
+            "El nodo fue excluido porque incluirlo empeoraría la solución actual. Tiene tiempo y capacidad disponibles." if not beauty_on
+            else "Con beauty=true el router excluye nodos que generarían cruces o rutas dispersas.",
+            "Agregar un vehículo adicional o revisar la distribución geográfica." if not beauty_on
+            else "Probar con beauty=false para priorizar la cobertura sobre la estética de la ruta."),
+        "exc_so_001": ("high","Descartado antes de optimizar — incompatibilidad de ventana (EXC_SO-001)",
+            "Ningún vehículo puede alcanzar este nodo dentro de su ventana horaria.",
+            "Ampliar la ventana de tiempo o revisar el turno de los vehículos candidatos."),
+        "cap_time_general":("medium","Sin causa específica detectada — combinación de restricciones",
+            "La herramienta no identificó un patrón concreto. El nodo quedó fuera por falta de tiempo o capacidad.",
+            "Revisar carga, duración y ventanas del nodo. Considerar agregar un vehículo."),
+    }
+
+    for key, nodes_list in cause_groups.items():
+        if key not in defs:
+            continue
+        sev, title, why, action = defs[key]
+        issues.append(Issue(key.upper(),"unattended",sev,
+            f"{title} — {len(nodes_list)} nodo(s)",
+            why, action, nodes_list))
+
+    # ─── 4. FLEET ────────────────────────────────────────────────────────────
+    active_cnt   = {vid:cnt for vid,cnt in routed_per_veh.items() if cnt>0}
+    idle_vehs    = [vid for vid,cnt in routed_per_veh.items() if cnt==0]
+    visits_list  = list(active_cnt.values())
+    single_ratio = sum(1 for v in visits_list if v==1)/max(len(visits_list),1) if visits_list else 0
+
+    if single_ratio > 0.8 and visits_list:
+        issues.append(Issue("FLEET_SINGLE_VISIT","fleet","high",
+            f"{int(single_ratio*100)}% de los vehículos activos hicieron exactamente 1 visita",
+            "Cada vehículo completa una visita y no puede encadenar más. Las ventanas pueden ser demasiado estrechas o el punto de inicio está lejos.",
+            "Ampliar las ventanas de tiempo o revisar las ubicaciones de inicio de los vehículos."))
+    if len(idle_vehs) > len(routed_per_veh)*0.2:
+        issues.append(Issue("FLEET_IDLE","fleet","high",
+            f"{len(idle_vehs)} vehículo(s) ({len(idle_vehs)*100//max(len(routed_per_veh),1)}%) sin ninguna visita asignada",
+            "Estos vehículos no participaron en ninguna ruta. Puede ser por zonas incompatibles, min_load imposible o turno incompatible.",
+            "Revisar zonas, min_load y turno de los vehículos inactivos.",
+            [{"ident":vid,"address":"","extra":""} for vid in idle_vehs]))
+
+    issues.sort(key=lambda i: (SEV_PRIORITY.get(i.severity,4), SCOPE_ORDER.get(i.scope,5)))
     return issues
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FILTERED NODES ANALYSIS
+# RENDERING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def analyze_filtered_nodes(req: dict, res: dict) -> list:
-    filtered  = res.get("filteredClientsNodes", [])
-    node_map  = {n["ident"]: n for n in req.get("nodes", [])}
-    vehicles  = req.get("vehicles", [])
-    results   = []
-
-    for fn in filtered:
-        ident    = fn["ident"]
-        codes    = fn.get("cause", {}).get("codes", [])
-        # Also handle W02102 format with nested details
-        if not codes and "cause" in fn:
-            cause = fn["cause"]
-            if isinstance(cause, dict):
-                codes = cause.get("codes", [])
-        req_node = node_map.get(ident, {})
-        nlat     = fn.get("lat") or req_node.get("lat")
-        nlon     = fn.get("lon") or req_node.get("lon")
-
-        min_dist, nearest_v, shift_min = None, None, None
-        for v in vehicles:
-            vlat = v.get("location_start", {}).get("lat")
-            vlon = v.get("location_start", {}).get("lon")
-            if vlat and vlon and nlat and nlon:
-                d = haversine_km(vlat, vlon, nlat, nlon)
-                if min_dist is None or d < min_dist:
-                    min_dist  = d
-                    nearest_v = v
-                    ss = parse_time(v.get("shift_start", "00:01"))
-                    se = parse_time(v.get("shift_end",   "23:59"))
-                    shift_min = (se - ss) if (ss and se) else None
-
-        geo_issue, geo_detail = False, ""
-        if min_dist is not None and shift_min is not None:
-            travel_min = (min_dist / 60) * 60
-            if travel_min * 2 > shift_min:
-                geo_issue  = True
-                geo_detail = (
-                    f"El vehículo más cercano está a ~{min_dist:.0f} km "
-                    f"({travel_min:.0f} min solo ida a 60 km/h). "
-                    f"El turno disponible es de {shift_min} min — insuficiente para ir y volver."
-                )
-
-        results.append({
-            "ident":      ident,
-            "address":    req_node.get("address", "N/A")[:60],
-            "codes":      codes,
-            "load":       fn.get("load", 0),
-            "load_2":     fn.get("load_2", 0),
-            "load_3":     fn.get("load_3", 0),
-            "dist_km":    round(min_dist, 1) if min_dist else None,
-            "geo_issue":  geo_issue,
-            "geo_detail": geo_detail,
-            "nearest_v":  nearest_v.get("ident") if nearest_v else None,
-        })
-
-    return results
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# COMPARATIVE ANALYSIS & FLEET UTILIZATION
-# ─────────────────────────────────────────────────────────────────────────────
-
-def comparative_analysis(req: dict, res: dict) -> dict:
-    """Compara nodos enrutados vs sin atender para identificar el diferenciador real."""
-    node_map   = {n["ident"]: n for n in req.get("nodes", [])}
-    unattended = res.get("unattendedClientsNodes", [])
-
-    routed_ids = set()
-    for v in res.get("vehicles", []):
-        for tour in v.get("tours", []):
-            for n in tour.get("nodes", []):
-                if not n["ident"].startswith("vehicle-"):
-                    routed_ids.add(n["ident"])
-
-    un_ids = {u["ident"] for u in unattended}
-    routed_nodes = [node_map[i] for i in routed_ids  if i in node_map]
-    un_nodes     = [node_map[i] for i in un_ids      if i in node_map]
-
-    if not routed_nodes or not un_nodes:
-        return {}
-
-    def avg(vals):
-        return round(float(np.mean(vals)), 1) if vals else 0
-
-    def window_min(n):
-        try:
-            ws = n.get("window_start", "")
-            we = n.get("window_end",   "")
-            h1, m1 = int(ws.split(":")[0]), int(ws.split(":")[1])
-            h2, m2 = int(we.split(":")[0]), int(we.split(":")[1])
-            return (h2*60+m2) - (h1*60+m1)
-        except:
-            return None
-
-    # Stats per group
-    def group_stats(nodes):
-        loads    = [n.get("load", 0) for n in nodes]
-        durs     = [try_int(n.get("duration")) for n in nodes]
-        durs     = [d for d in durs if d is not None]
-        windows  = [w for n in nodes if (w := window_min(n)) is not None]
-        return {
-            "load_mean":    avg(loads),
-            "load_median":  round(float(np.median(loads)), 1) if loads else 0,
-            "dur_mean":     avg(durs),
-            "window_mean":  avg(windows),
-            "count":        len(nodes),
-        }
-
-    r_stats = group_stats(routed_nodes)
-    u_stats = group_stats(un_nodes)
-
-    # Detect differentiators
-    differentiators = []
-
-    # Load differentiator
-    if r_stats["load_mean"] > 0 and u_stats["load_mean"] > 0:
-        ratio = r_stats["load_mean"] / max(u_stats["load_mean"], 0.01)
-        if ratio > 2.0:
-            differentiators.append({
-                "field":      "load (carga)",
-                "routed":     f"{r_stats['load_mean']:.0f}",
-                "unattended": f"{u_stats['load_mean']:.0f}",
-                "diff":       f"{ratio:.1f}×",
-                "severity":   "high",
-                "conclusion": (
-                    f"Los nodos enrutados tienen {ratio:.1f}× más carga que los sin atender "
-                    f"({r_stats['load_mean']:.0f} vs {u_stats['load_mean']:.0f}). "
-                    f"El router priorizó los de mayor carga — los de menor carga quedaron sin vehículo disponible."
-                ),
-                "fix": "Verificar si hay suficientes vehículos para cubrir todos los nodos, o revisar la lógica de priorización de carga.",
-            })
-        elif ratio < 0.5:
-            differentiators.append({
-                "field":      "load (carga)",
-                "routed":     f"{r_stats['load_mean']:.0f}",
-                "unattended": f"{u_stats['load_mean']:.0f}",
-                "diff":       f"{1/ratio:.1f}× mayor en sin atender",
-                "severity":   "high",
-                "conclusion": (
-                    f"Los nodos sin atender tienen {1/ratio:.1f}× más carga que los enrutados. "
-                    f"La capacidad de los vehículos puede ser insuficiente para los nodos más pesados."
-                ),
-                "fix": "Revisar si la carga de los nodos sin atender excede la capacidad de los vehículos disponibles.",
-            })
-
-    # Window differentiator
-    if r_stats["window_mean"] > 0 and u_stats["window_mean"] > 0:
-        w_ratio = r_stats["window_mean"] / max(u_stats["window_mean"], 0.01)
-        if w_ratio > 1.5:
-            differentiators.append({
-                "field":      "ventana de tiempo",
-                "routed":     f"{r_stats['window_mean']:.0f} min",
-                "unattended": f"{u_stats['window_mean']:.0f} min",
-                "diff":       f"{w_ratio:.1f}×",
-                "severity":   "high",
-                "conclusion": (
-                    f"Los nodos enrutados tienen ventanas {w_ratio:.1f}× más amplias "
-                    f"({r_stats['window_mean']:.0f} vs {u_stats['window_mean']:.0f} min). "
-                    f"Las ventanas estrechas de los nodos sin atender no permiten encadenar visitas."
-                ),
-                "fix": "Ampliar las ventanas de tiempo de los nodos sin atender para permitir encadenamiento de visitas.",
-            })
-        elif w_ratio < 0.67:
-            differentiators.append({
-                "field":      "ventana de tiempo",
-                "routed":     f"{r_stats['window_mean']:.0f} min",
-                "unattended": f"{u_stats['window_mean']:.0f} min",
-                "diff":       f"{1/w_ratio:.1f}× mayor en sin atender",
-                "severity":   "medium",
-                "conclusion": (
-                    f"Los nodos sin atender tienen ventanas más amplias pero aun así no fueron cubiertos. "
-                    f"La ventana no es el diferenciador principal."
-                ),
-                "fix": "Revisar otros factores como geografía o disponibilidad de vehículos.",
-            })
-
-    # Duration differentiator
-    if r_stats["dur_mean"] > 0 and u_stats["dur_mean"] > 0:
-        d_ratio = r_stats["dur_mean"] / max(u_stats["dur_mean"], 0.01)
-        if d_ratio > 2.0 or d_ratio < 0.5:
-            differentiators.append({
-                "field":      "duration (servicio)",
-                "routed":     f"{r_stats['dur_mean']:.0f} min",
-                "unattended": f"{u_stats['dur_mean']:.0f} min",
-                "diff":       f"{max(d_ratio, 1/d_ratio):.1f}×",
-                "severity":   "medium",
-                "conclusion": (
-                    f"Diferencia significativa en tiempos de servicio entre grupos "
-                    f"({r_stats['dur_mean']:.0f} vs {u_stats['dur_mean']:.0f} min)."
-                ),
-                "fix": "Revisar si la duración de servicio de los nodos sin atender es correcta.",
-            })
-
-    return {
-        "routed_stats":   r_stats,
-        "unatt_stats":    u_stats,
-        "differentiators": differentiators,
-    }
-
-
-def fleet_utilization(req: dict, res: dict) -> dict:
-    """Analiza la utilización real de cada vehículo: visitas, carga y % de capacidad."""
-    vehicles   = {v["ident"]: v for v in req.get("vehicles", [])}
-    node_map   = {n["ident"]: n for n in req.get("nodes",    [])}
-
-    # Build load per vehicle from response
-    veh_data = {}
-    for v_res in res.get("vehicles", []):
-        vid   = v_res["ident"]
-        v_req = vehicles.get(vid, {})
-        visits = 0
-        load1  = 0.0
-        for tour in v_res.get("tours", []):
-            for n in tour.get("nodes", []):
-                if not n["ident"].startswith("vehicle-"):
-                    visits += 1
-                    req_n   = node_map.get(n["ident"], {})
-                    load1  += req_n.get("load", 0) or 0
-
-        cap1 = v_req.get("capacity", 0) or 0
-        pct  = round(load1 / cap1 * 100, 1) if cap1 > 0 and cap1 < 1e15 else None
-
-        veh_data[vid] = {
-            "visits":   visits,
-            "load1":    round(load1, 1),
-            "cap1":     cap1,
-            "cap_pct":  pct,
-            "at_cap":   pct is not None and pct >= 90,
-        }
-
-    active  = {k: v for k, v in veh_data.items() if v["visits"] > 0}
-    idle    = {k: v for k, v in veh_data.items() if v["visits"] == 0}
-    at_cap  = {k: v for k, v in active.items()   if v["at_cap"]}
-
-    visits_list = [v["visits"] for v in active.values()]
-    avg_visits  = round(float(np.mean(visits_list)), 1) if visits_list else 0
-
-    # Flag: each vehicle only does 1 visit
-    single_visit_ratio = sum(1 for v in visits_list if v == 1) / max(len(visits_list), 1)
-
-    return {
-        "total":              len(veh_data),
-        "active":             len(active),
-        "idle":               len(idle),
-        "at_cap":             len(at_cap),
-        "avg_visits":         avg_visits,
-        "max_visits":         max(visits_list) if visits_list else 0,
-        "min_visits":         min(visits_list) if visits_list else 0,
-        "single_visit_ratio": round(single_visit_ratio * 100, 1),
-        "veh_data":           veh_data,
-        "alert_single":       single_visit_ratio > 0.8,
-        "alert_idle":         len(idle) > len(veh_data) * 0.2,
-        "alert_at_cap":       len(at_cap) > len(active) * 0.5,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ANALYSIS ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def analyze(req: dict, res: dict) -> dict:
-    findings = {
-        "summary": {}, "unattended": [], "zone_stats": {},
-        "recommendations": [], "raw_issue_counts": Counter(),
-    }
-
-    node_map   = {n["ident"]: n for n in req.get("nodes", [])}
-    vehicles   = {v["ident"]: v for v in req.get("vehicles", [])}
-    unattended = res.get("unattendedClientsNodes", [])
-    filtered   = res.get("filteredClientsNodes", [])
-
-    # ── Nodos enrutados y stats de max_visit ──────────────────────────────────
-    all_routed_ids     = set()
-    routed_per_vehicle = {}
-    for v in res.get("vehicles", []):
-        vid   = v["ident"]
-        count = 0
-        for tour in v.get("tours", []):
-            for n in tour.get("nodes", []):
-                if not n["ident"].startswith("vehicle-"):
-                    all_routed_ids.add(n["ident"])
-                    count += 1
-        routed_per_vehicle[vid] = count
-
-    max_visit_global = None
-    vehicles_at_max  = []
-    vehicles_idle    = []
-    for vid, v in vehicles.items():
-        mv = v.get("max_visit")
-        if mv is not None:
-            max_visit_global = mv
-            if routed_per_vehicle.get(vid, 0) >= mv:
-                vehicles_at_max.append(vid)
-        if routed_per_vehicle.get(vid, 0) == 0:
-            vehicles_idle.append(vid)
-
-    # ── Último estado de cada vehículo (posición + tiempo salida) ─────────────
-    vehicle_last_state = {}
-    for v_res in res.get("vehicles", []):
-        vid = v_res["ident"]
-        v_req = vehicles.get(vid, {})
-        shift_end_min = parse_time(v_req.get("shift_end", "23:59"))
-        last_lat = last_lon = last_dep_min = None
-
-        for tour in v_res.get("tours", []):
-            real_nodes = [n for n in tour.get("nodes", []) if not n["ident"].startswith("vehicle-")]
-            if real_nodes:
-                last_n    = real_nodes[-1]
-                req_last  = node_map.get(last_n["ident"], {})
-                last_lat  = req_last.get("lat")
-                last_lon  = req_last.get("lon")
-                dep_str   = last_n.get("departure", "")
-                if dep_str:
-                    try:
-                        h, m, *_ = dep_str.split(":")
-                        last_dep_min = int(h) * 60 + int(m)
-                    except Exception:
-                        pass
-
-        if last_lat is not None and shift_end_min is not None and last_dep_min is not None:
-            remaining = shift_end_min - last_dep_min
-            vehicle_last_state[vid] = {
-                "lat":       last_lat,
-                "lon":       last_lon,
-                "dep_min":   last_dep_min,
-                "shift_end": shift_end_min,
-                "remaining": remaining,
-            }
-
-    # ── Zonas ─────────────────────────────────────────────────────────────────
-    zone_to_vehicles = defaultdict(list)
-    for vid, v in vehicles.items():
-        for z in v.get("zones", []):
-            zone_to_vehicles[z].append(vid)
-    vehicles_no_zone = [vid for vid, v in vehicles.items() if not v.get("zones")]
-
-    zone_nodes = defaultdict(list)
-    for n in req.get("nodes", []):
-        zones = n.get("zones", [])
-        if zones:
-            for z in zones:
-                zone_nodes[z].append(n)
-        else:
-            zone_nodes["sin_zona"].append(n)
-
-    for zone, nodes in zone_nodes.items():
-        durations_valid = [d for d in [try_int(n.get("duration")) for n in nodes] if d is not None]
-        outlier_vals    = detect_outliers_iqr(durations_valid)
-        total_dur       = sum(durations_valid)
-        outlier_count   = sum(1 for d in durations_valid if d in outlier_vals)
-        normal_durs     = [d for d in durations_valid if d not in outlier_vals]
-        median_normal   = float(np.median(normal_durs)) if normal_durs else 0
-        corrected_dur   = sum(normal_durs) + outlier_count * median_normal
-
-        veh_ids         = zone_to_vehicles.get(zone, vehicles_no_zone if zone == "sin_zona" else [])
-        avail_min_veh   = 0
-        avail_min_total = 0
-        shift_info      = ("00:01", "23:59")
-        if veh_ids:
-            v  = vehicles.get(veh_ids[0], {})
-            ss = v.get("shift_start", "00:01")
-            se = v.get("shift_end",   "23:59")
-            ps, pe = parse_time(ss), parse_time(se)
-            if ps is not None and pe is not None:
-                avail_min_veh   = pe - ps
-                avail_min_total = avail_min_veh * len(veh_ids)
-                shift_info      = (ss, se)
-
-        findings["zone_stats"][zone] = {
-            "total_nodes":    len(nodes),
-            "total_dur":      total_dur,
-            "avail_min":      avail_min_total,
-            "avail_min_veh":  avail_min_veh,
-            "num_vehicles":   len(veh_ids),
-            "overflow":       total_dur > avail_min_total if avail_min_total > 0 else False,
-            "outlier_vals":   outlier_vals,
-            "outlier_count":  outlier_count,
-            "vehicles":       veh_ids,
-            "shift_info":     shift_info,
-            "mean_dur":       np.mean(durations_valid) if durations_valid else 0,
-            "corrected_dur":  corrected_dur,
-        }
-
-    # ── Análisis por nodo sin atender ─────────────────────────────────────────
-    issue_counts  = Counter()
-    cause_details = []
-
-    for un in unattended:
-        ident      = un["ident"]
-        cause_code = un.get("cause", {}).get("code", "")
-        cause_msg  = un.get("cause", {}).get("details", "")
-        req_node   = node_map.get(ident, {})
-
-        node_zones  = req_node.get("zones", [])
-        node_dur    = try_int(req_node.get("duration"))
-        node_ws     = req_node.get("window_start", "00:00")
-        node_we     = req_node.get("window_end",   "23:59")
-        node_skills = req_node.get("skills_required", [])
-        node_group  = req_node.get("group", [ident])
-        issues      = []
-
-        cand_vehicles = []
-        for z in node_zones:
-            cand_vehicles.extend(zone_to_vehicles.get(z, []))
-        if not cand_vehicles:
-            cand_vehicles = vehicles_no_zone[:]
-
-        ws_m = parse_time(node_ws)
-        we_m = parse_time(node_we)
-
-        # 1. Ventana de 0 minutos
-        if node_ws == node_we and node_dur and node_dur > 0:
-            issues.append({
-                "type": "zero_window", "severity": "high",
-                "field": "window_start / window_end",
-                "value": f"{node_ws} == {node_we}, duration={node_dur}",
-                "detail": f"Ventana de 0 minutos con duration={node_dur} min. El nodo no puede ser atendido.",
-                "fix":    "Ampliar window_end o establecer duration=0",
-            })
-
-        # 2. Ventana estrecha (ventana < duración)
-        elif ws_m is not None and we_m is not None and node_dur is not None:
-            window_size = we_m - ws_m
-            if 0 < window_size < node_dur:
-                issues.append({
-                    "type": "narrow_window", "severity": "high",
-                    "field": "window_end",
-                    "value": f"ventana={window_size} min < duration={node_dur} min",
-                    "detail": f"Ventana de {window_size} min es menor que la duración de servicio ({node_dur} min).",
-                    "fix":    "Ampliar window_end o reducir duration",
-                })
-            # 2b. Ventana igual a duración (sin tiempo para traslado)
-            elif window_size == node_dur and node_dur > 0:
-                issues.append({
-                    "type": "tight_window", "severity": "high",
-                    "field": "window_end / duration",
-                    "value": f"ventana={window_size} min == duration={node_dur} min",
-                    "detail": (
-                        f"La ventana de tiempo ({window_size} min) es exactamente igual a la duración "
-                        f"de servicio ({node_dur} min), dejando 0 minutos para el traslado. "
-                        f"El router no puede llegar, atender y salir dentro del mismo intervalo."
-                    ),
-                    "fix": "Ampliar window_end al menos 15–30 min más allá de la duración de servicio",
-                })
-
-        # 3. Duration outlier
-        for z in (node_zones if node_zones else ["sin_zona"]):
-            zs = findings["zone_stats"].get(z, {})
-            if node_dur is not None and node_dur in zs.get("outlier_vals", set()):
-                issues.append({
-                    "type": "duration_anomaly", "severity": "high",
-                    "field": "duration", "value": node_dur,
-                    "detail": (
-                        f"duration={node_dur} min es un outlier estadístico en zona {z}. "
-                        f"Media del resto: ~{zs.get('mean_dur', 0):.0f} min."
-                    ),
-                    "fix": "Reemplazar duration por el tiempo real de servicio",
-                })
-                break
-
-        # 4. Desborde de tiempo en zona
-        for z in (node_zones if node_zones else ["sin_zona"]):
-            zs = findings["zone_stats"].get(z, {})
-            if zs.get("overflow"):
-                issues.append({
-                    "type": "zone_time_overflow", "severity": "high",
-                    "field": "duration (zona)",
-                    "value": f"{zs['total_dur']} / {zs['avail_min']} min",
-                    "detail": (
-                        f"Zona {z}: servicio total {format_time_min(zs['total_dur'])} "
-                        f"excede ventana total {format_time_min(zs['avail_min'])} "
-                        f"({zs['num_vehicles']} vehículo(s) × {format_time_min(zs['avail_min_veh'])})."
-                    ),
-                    "fix": "Corregir durations outlier y/o agregar vehículo a la zona",
-                })
-                break
-
-        # 5. Ventana vs turno
-        if cand_vehicles:
-            any_overlap = any(
-                time_overlap(node_ws, node_we,
-                             vehicles[vid].get("shift_start", "00:01"),
-                             vehicles[vid].get("shift_end",   "23:59"))
-                for vid in cand_vehicles if vid in vehicles
-            )
-            if not any_overlap:
-                issues.append({
-                    "type": "window_shift_mismatch", "severity": "high",
-                    "field": "window_start / window_end",
-                    "value": f"{node_ws}–{node_we}",
-                    "detail": "La ventana del nodo no se solapa con el turno de ningún vehículo candidato.",
-                    "fix":    "Ajustar window_start/window_end o el shift del vehículo",
-                })
-
-        # 6. Capacidad
-        for vid in cand_vehicles:
-            v = vehicles.get(vid, {})
-            c1 = v.get("capacity",   0) or 0
-            c2 = v.get("capacity_2", 0) or 0
-            c3 = v.get("capacity_3", 0) or 0
-            l1, l2, l3 = un.get("load", 0), un.get("load_2", 0), un.get("load_3", 0)
-            if l1 > c1 or l2 > c2 or (c3 > 0 and l3 > c3):
-                issues.append({
-                    "type": "capacity_overflow", "severity": "high",
-                    "field": "load",
-                    "value": f"{l1}/{c1} | {l2}/{c2} | {l3}/{c3}",
-                    "detail": f"La carga del nodo excede la capacidad del vehículo {vid}.",
-                    "fix":    "Revisar la carga del nodo o la capacidad del vehículo",
-                })
-                break
-
-        # 7. Zona sin vehículo
-        if node_zones and not any(z in zone_to_vehicles for z in node_zones):
-            issues.append({
-                "type": "zone_mismatch", "severity": "medium",
-                "field": "zones", "value": str(node_zones),
-                "detail": f"Ningún vehículo tiene asignada la zona {node_zones}.",
-                "fix":    "Asignar la zona a un vehículo disponible",
-            })
-
-        # 7b. Nodo con zona, pero vehículos candidatos al límite Y hay vehículos inactivos sin zona
-        if not issues and node_zones and not req.get("autoZone", False):
-            all_veh_zones_local = set()
-            for v in vehicles.values():
-                all_veh_zones_local.update(v.get("zones", []))
-            # Hay vehículos sin zona que podrían cubrir el nodo si tuvieran zona
-            if vehicles_no_zone and all_veh_zones_local:
-                issues.append({
-                    "type": "inactive_vehicles_no_zone", "severity": "high",
-                    "field": "zones (vehículo)",
-                    "value": f"{len(vehicles_no_zone)} vehículo(s) sin zona",
-                    "detail": (
-                        f"Este nodo tiene zona asignada {node_zones} pero hay "
-                        f"{len(vehicles_no_zone)} vehículo(s) con zones=[] que no pueden atenderlo. "
-                        f"Con autoZone=false, esos vehículos quedan completamente inactivos. "
-                        f"Ver detalle en Validación pre-vuelo."
-                    ),
-                    "fix": f"Asignar la(s) zona(s) {node_zones} a los vehículos inactivos.",
-                })
-
-        # 8. Skills
-        if node_skills:
-            all_skills = set()
-            for v in vehicles.values():
-                all_skills.update(v.get("skills", []))
-            missing = [s for s in node_skills if s not in all_skills]
-            if missing:
-                issues.append({
-                    "type": "skills_mismatch", "severity": "medium",
-                    "field": "skills_required", "value": str(missing),
-                    "detail": f"Ningún vehículo tiene las skills requeridas: {missing}.",
-                    "fix":    "Agregar las skills al vehículo correspondiente",
-                })
-
-        # 9. Nodo sin zona con vehículos que tienen zona (autoZone=false)
-        if not issues and not node_zones and not req.get("autoZone", False):
-            all_veh_zones_local = set()
-            for v in vehicles.values():
-                all_veh_zones_local.update(v.get("zones", []))
-            if all_veh_zones_local and not vehicles_no_zone:
-                issues.append({
-                    "type": "nodes_no_zone", "severity": "medium",
-                    "field": "zones (nodo)",
-                    "value": "zones=[]",
-                    "detail": "Nodo sin zona — ver detalle en Validación pre-vuelo.",
-                    "fix": "Asignar la zona correcta al nodo, o agregar un vehículo con zones=[].",
-                })
-
-        # 10. max_visit — vehículos llenos (sin otra causa detectada)
-        if not issues and max_visit_global and vehicles_at_max:
-            issues.append({
-                "type": "max_visit_limit", "severity": "medium",
-                "field": "max_visit",
-                "value": f"max_visit={max_visit_global}",
-                "detail": (
-                    f"{len(vehicles_at_max)} de {len(vehicles)} vehículos llegaron al límite "
-                    f"de {max_visit_global} visitas y no pueden recibir más nodos. "
-                    f"Hay {len(vehicles_idle)} vehículo(s) sin ninguna visita asignada."
-                ),
-                "fix": f"Aumentar max_visit por encima de {max_visit_global} o reasignar vehículos inactivos",
-            })
-
-        # Fallback — Turno insuficiente para cubrir todas las visitas
-        if not issues and vehicle_last_state:
-            node_lat = req_node.get("lat")
-            node_lon = req_node.get("lon")
-            node_service = node_dur or 0
-            if node_lat and node_lon:
-                best_veh = None
-                best_rem = None
-                best_travel = None
-                for vid, vs in vehicle_last_state.items():
-                    dist_km    = haversine_km(vs["lat"], vs["lon"], node_lat, node_lon)
-                    travel_min = (dist_km / 60) * 60  # 60 km/h
-                    if best_veh is None or dist_km < haversine_km(
-                        vehicle_last_state[best_veh]["lat"],
-                        vehicle_last_state[best_veh]["lon"],
-                        node_lat, node_lon
-                    ):
-                        best_veh    = vid
-                        best_rem    = vs["remaining"]
-                        best_travel = travel_min
-
-                # Dispara cuando: traslado + servicio > tiempo restante
-                if best_rem is not None and best_travel is not None:
-                    time_needed = best_travel + node_service
-                    if time_needed > best_rem:
-                        dep_h = int(vehicle_last_state[best_veh]["dep_min"] // 60)
-                        dep_m = int(vehicle_last_state[best_veh]["dep_min"] % 60)
-                        end_h = int(vehicle_last_state[best_veh]["shift_end"] // 60)
-                        end_m = int(vehicle_last_state[best_veh]["shift_end"] % 60)
-                        issues.append({
-                            "type": "shift_time_exhausted", "severity": "high",
-                            "field": "shift_end",
-                            "value": f"~{best_travel:.0f} min traslado + {node_service} min servicio = {time_needed:.0f} min > {best_rem:.0f} min restantes",
-                            "detail": (
-                                f"El vehículo más cercano completó su última visita a las "
-                                f"{dep_h:02d}:{dep_m:02d} y su turno termina a las {end_h:02d}:{end_m:02d} "
-                                f"({best_rem:.0f} min restantes). "
-                                f"Llegar a este nodo toma ~{best_travel:.0f} min de traslado + "
-                                f"{node_service} min de servicio = {time_needed:.0f} min en total — "
-                                f"insuficiente para alcanzarlo a tiempo."
-                            ),
-                            "fix": "Ampliar el turno del vehículo o asignar un vehículo adicional a este sector.",
-                        })
-
-        # Fallback genérico
-        if not issues:
-            if cause_code == "EXC_SO-002":
-                beauty_on = req.get("beauty", True)
-                if beauty_on:
-                    issues.append({
-                        "type": "clustering_preference", "severity": "low",
-                        "field": "beauty", "value": cause_code,
-                        "detail": (
-                            "El optimizador excluyó este nodo para producir rutas más agrupadas "
-                            "y con menos cruces (beauty=true activo). Tiene tiempo y capacidad disponibles."
-                        ),
-                        "fix": "Probar con beauty=false para priorizar atender todos los nodos sobre la agrupación.",
-                    })
-                else:
-                    issues.append({
-                        "type": "clustering_preference", "severity": "medium",
-                        "field": "flota / turno", "value": cause_code,
-                        "detail": (
-                            "El optimizador descartó este nodo porque no encontró forma de incluirlo "
-                            "sin afectar la calidad del resto de las rutas. "
-                            "Tiene tiempo y capacidad disponibles."
-                        ),
-                        "fix": "Agregar un vehículo adicional o ampliar el turno.",
-                    })
-            elif cause_code == "EXC_SO-001":
-                issues.append({
-                    "type": "exc_so_001", "severity": "high",
-                    "field": "window_start / window_end",
-                    "value": cause_code,
-                    "detail": (
-                        "El nodo fue excluido por restricción de ventana de tiempo antes de la "
-                        "optimización. Ningún vehículo puede alcanzarlo dentro de su ventana horaria."
-                    ),
-                    "fix": "Ampliar la ventana de tiempo o revisar el turno de los vehículos candidatos",
-                })
-            else:
-                issues.append({
-                    "type": "capacity_time_general", "severity": "medium",
-                    "field": "tiempo / capacidad", "value": cause_code,
-                    "detail": (
-                        "No se detectó una causa específica. El nodo quedó fuera por "
-                        "falta de tiempo o capacidad en los vehículos cercanos."
-                    ),
-                    "fix": "Revisar carga, duración y ventanas del nodo",
-                })
-
-        for iss in issues:
-            issue_counts[iss["type"]] += 1
-
-        cause_details.append({
-            "ident":        ident,
-            "cause_code":   cause_code,
-            "address":      req_node.get("address", "N/A")[:60],
-            "zones":        node_zones,
-            "duration":     node_dur,
-            "window":       f"{node_ws}–{node_we}",
-            "load":         un.get("load",   0),
-            "load_2":       un.get("load_2", 0),
-            "load_3":       un.get("load_3", 0),
-            "issues":       issues,
-            "primary_type": issues[0]["type"] if issues else "unknown",
-        })
-
-    findings["unattended"]       = cause_details
-    findings["raw_issue_counts"] = issue_counts
-
-    # ── Recomendaciones ───────────────────────────────────────────────────────
-    recs = []
-
-    # max_visit — primera prioridad si aplica
-    if max_visit_global and vehicles_at_max:
-        recs.append({
-            "priority": 1, "color": "#ef4444",
-            "title": f"Aumentar o eliminar el límite max_visit={max_visit_global}",
-            "detail": (
-                f"{len(vehicles_at_max)} vehículo(s) llegaron al tope de {max_visit_global} visitas "
-                f"y no pueden recibir más nodos aunque tengan tiempo y capacidad disponibles. "
-                f"Hay {len(vehicles_idle)} vehículo(s) sin ninguna visita asignada que podrían "
-                f"absorber los nodos pendientes."
-            ),
-            "field": "max_visit",
-            "affected": issue_counts.get("max_visit_limit", len(unattended)),
-        })
-
-    # Desborde de tiempo por zona
-    for z, zs in findings["zone_stats"].items():
-        if zs.get("overflow") and zs.get("outlier_count", 0) > 0:
-            recs.append({
-                "priority": 1, "color": "#ef4444",
-                "title": f"Corregir duration outlier en zona {z}",
-                "detail": (
-                    f"{zs['outlier_count']} nodo(s) tienen duration={zs['outlier_vals']} — "
-                    f"valor atípico estadísticamente. Corrigiéndolos el tiempo total bajaría "
-                    f"de {format_time_min(zs['total_dur'])} a ~{format_time_min(zs['corrected_dur'])}, "
-                    f"dentro de la ventana total disponible de {format_time_min(zs['avail_min'])} "
-                    f"({zs['num_vehicles']} vehículo(s) × {format_time_min(zs['avail_min_veh'])})."
-                ),
-                "field": "duration", "affected": zs["outlier_count"],
-            })
-        elif zs.get("overflow"):
-            recs.append({
-                "priority": 1, "color": "#ef4444",
-                "title": f"Agregar vehículo o ampliar turno en zona {z}",
-                "detail": (
-                    f"Zona {z}: la suma de tiempos de servicio ({format_time_min(zs['total_dur'])}) "
-                    f"excede el tiempo total disponible entre los {zs['num_vehicles']} vehículo(s) "
-                    f"({format_time_min(zs['avail_min'])}). "
-                    f"No se detectaron outliers de duration — se necesita más capacidad temporal."
-                ),
-                "field": "shift_end o nuevo vehículo", "affected": zs["total_nodes"],
-            })
-
-    issue_recs = [
-        ("shift_time_exhausted",
-         "Turno insuficiente para cubrir todas las visitas",
-         "El vehículo agotó su turno antes de poder llegar a estos nodos. "
-         "Están demasiado lejos del último punto visitado dado el tiempo restante. "
-         "Ampliar el turno o asignar un vehículo adicional al sector.",
-         1, "#ef4444", "shift_end"),
-
-        ("tight_window",
-         "Ampliar ventanas iguales a la duración de servicio",
-         "La ventana de tiempo es exactamente igual a la duración de servicio, "
-         "dejando 0 minutos para el traslado. El router no puede completar la visita "
-         "dentro del intervalo. Ampliar la ventana al menos 15–30 min adicionales.",
-         1, "#ef4444", "window_end"),
-
-        ("exc_so_001",
-         "Revisar ventanas de nodos excluidos antes de optimizar (EXC_SO-001)",
-         "Estos nodos fueron descartados por el router antes de la optimización "
-         "por incompatibilidad de ventana horaria con los vehículos disponibles.",
-         2, "#f59e0b", "window_start / window_end"),
-
-        ("zero_window",
-         "Corregir nodos con ventana de 0 minutos",
-         "Estos nodos tienen window_start igual a window_end con duration > 0. "
-         "Es imposible atenderlos en una ventana de 0 minutos.",
-         1, "#ef4444", "window_start / window_end"),
-
-        ("window_shift_mismatch",
-         "Ajustar ventanas incompatibles con el turno del vehículo",
-         "La ventana de tiempo del nodo no se solapa con el horario de ningún vehículo candidato. "
-         "El router los descarta aunque haya capacidad disponible.",
-         2, "#f59e0b", "window_start / window_end"),
-
-        ("narrow_window",
-         "Ampliar ventanas más pequeñas que la duración de servicio",
-         "La ventana disponible es menor que el tiempo necesario para completar la visita. "
-         "Es físicamente imposible atenderlos.",
-         2, "#f59e0b", "window_end"),
-
-        ("inverted_window",
-         "Corregir ventanas horarias invertidas (E01006)",
-         "window_start es posterior a window_end. El router rechaza estas ventanas.",
-         2, "#f59e0b", "window_start / window_end"),
-
-        ("inactive_vehicles_no_zone",
-         "Asignar zonas a los vehículos inactivos",
-         "Hay vehículos con zones=[] que no pueden atender ningún nodo porque todos los nodos "
-         "tienen zona asignada y autoZone=false. Estos vehículos están completamente inactivos. "
-         "Asignarles las zonas correspondientes los activaría inmediatamente.",
-         1, "#ef4444", "zones (vehículo)"),
-
-        ("zone_mismatch",
-         "Asignar vehículos a las zonas sin cobertura",
-         "Estos nodos tienen una zona asignada pero ningún vehículo cubre esa zona. "
-         "El router los ignora completamente.",
-         2, "#f59e0b", "zones (vehículo)"),
-
-        ("capacity_overflow",
-         "Revisar nodos cuya carga excede la capacidad de todos los vehículos",
-         "La carga individual supera la capacidad de cualquier vehículo disponible. "
-         "Ningún vehículo puede atenderlos independientemente de la ruta.",
-         2, "#f59e0b", "load / capacity"),
-
-        ("skills_mismatch",
-         "Agregar skills faltantes a vehículos",
-         "Estos nodos requieren skills que ningún vehículo tiene asignadas. "
-         "El router no puede asignarlos a ningún vehículo.",
-         3, "#3b82f6", "skills (vehículo)"),
-
-        ("capacity_time_general",
-         "Revisar configuración de nodos sin causa específica detectada",
-         "No se identificó un problema concreto. Puede ser consecuencia de una combinación "
-         "de restricciones globales. Revisar carga, duración y ventanas.",
-         4, "#6b7280", "múltiples campos"),
-    ]
-
-    # Tipos cubiertos por el pre-vuelo — no repetir en recomendaciones
-    COVERED_BY_PREFLIGHT = {"nodes_no_zone"}
-
-    for issue_type, title, detail, priority, color, field in issue_recs:
-        cnt = issue_counts.get(issue_type, 0)
-        if cnt > 0 and issue_type not in COVERED_BY_PREFLIGHT:
-            recs.append({
-                "priority": priority, "color": color,
-                "title":    title,
-                "detail":   f"{cnt} nodo(s) afectado(s). {detail}",
-                "field":    field, "affected": cnt,
-            })
-
-    # Recomendación clustering — dinámica según beauty
-    cnt_clustering = issue_counts.get("clustering_preference", 0)
-    if cnt_clustering > 0:
-        beauty_on = req.get("beauty", True)
-        if beauty_on:
-            recs.append({
-                "priority": 4, "color": "#6b7280",
-                "title":    "Evaluar desactivar el parámetro beauty",
-                "detail":   (
-                    f"{cnt_clustering} nodo(s) afectado(s). "
-                    "El optimizador los excluyó para minimizar cruces y producir rutas más agrupadas (beauty=true). "
-                    "Tienen tiempo y capacidad disponibles — con beauty=false serían incluidos."
-                ),
-                "field": "beauty", "affected": cnt_clustering,
-            })
-        else:
-            recs.append({
-                "priority": 3, "color": "#3b82f6",
-                "title":    "Nodos descartados por el optimizador sin causa específica",
-                "detail":   (
-                    f"{cnt_clustering} nodo(s) fueron descartados por el optimizador. "
-                    "Con los vehículos y tiempos actuales no encontró una forma de incluirlos "
-                    "sin afectar la calidad del resto de las rutas. "
-                    "Considera agregar un vehículo adicional o ampliar el turno."
-                ),
-                "field": "flota / turno", "affected": cnt_clustering,
-            })
-
-    recs.sort(key=lambda r: r["priority"])
-    findings["recommendations"] = recs
-
-    findings["summary"] = {
-        "total_nodes":       len(req.get("nodes", [])),
-        "total_vehicles":    len(req.get("vehicles", [])),
-        "routed_nodes":      len(all_routed_ids),
-        "unattended_count":  len(unattended),
-        "filtered_count":    len(filtered),
-        "vehicles_used":     res.get("num_vehicles_used", 0),
-        "so002": sum(1 for u in unattended if u.get("cause", {}).get("code") == "EXC_SO-002"),
-        "so003": sum(1 for u in unattended if u.get("cause", {}).get("code") == "EXC_SO-003"),
-        "attendance_rate":   round(len(all_routed_ids) / max(len(req.get("nodes", [])), 1) * 100, 1),
-        "max_visit_global":  max_visit_global,
-        "vehicles_at_max":   len(vehicles_at_max),
-        "vehicles_idle":     len(vehicles_idle),
-    }
-    return findings
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# UI COMPONENTS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def render_metric(label, value, color="#1a1d2e", suffix=""):
+def render_issue_card(issue: Issue, idx: Optional[int]=None):
+    color  = SEV_COLOR.get(issue.severity,"#6b7280")
+    badge  = f'<span class="badge {BADGE_CLASS.get(issue.severity,"badge-gray")}">{issue.code}</span>'
+    prefix = f"{idx}. " if idx else ""
+    count  = f'<span style="float:right;font-size:11px;opacity:0.55">{len(issue.affected)} nodo(s)</span>' if issue.affected else ""
+
+    rows = ""
+    for a in issue.affected[:12]:
+        rows += f"<tr><td style='font-family:monospace;font-size:11px;padding:3px 8px;width:200px'>{a.get('ident','')[:36]}</td><td style='font-size:11px;padding:3px 8px'>{a.get('address','')}</td><td style='font-size:11px;padding:3px 8px;opacity:0.55'>{a.get('extra','')}</td></tr>"
+    if len(issue.affected)>12:
+        rows += f"<tr><td colspan='3' style='font-size:11px;padding:4px 8px;opacity:0.4'>… y {len(issue.affected)-12} más</td></tr>"
+    node_html = f"<table class='node-table'>{rows}</table>" if rows else ""
+
+    st.markdown(f"""
+    <div class="issue-card" style="border-left-color:{color}">
+        <div style="margin-bottom:6px">{badge}{count}</div>
+        <div class="issue-title">{prefix}{issue.title}</div>
+        <div class="issue-why">{issue.why}</div>
+        <div class="issue-action">→ {issue.action}</div>
+        {node_html}
+    </div>""", unsafe_allow_html=True)
+
+
+def render_metric(label, value, color="inherit", suffix=""):
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-val" style="color:{color}">{value}{suffix}</div>
         <div class="metric-lbl">{label}</div>
     </div>""", unsafe_allow_html=True)
 
-def render_recommendation(rec, idx):
-    st.markdown(f"""
-    <div class="rec-card" style="border-left: 4px solid {rec['color']};">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px;">
-            <div class="rec-title">{idx}. {rec['title']}</div>
-            <span class="badge badge-gray">{rec['affected']} afectado(s)</span>
-        </div>
-        <div class="rec-detail">{rec['detail']}</div>
-        <div class="rec-field">Campo: <code>{rec['field']}</code></div>
-    </div>""", unsafe_allow_html=True)
 
-def render_preflight_issue(issue):
-    sev_color = {"critical": "#ef4444", "high": "#f59e0b", "medium": "#3b82f6"}.get(issue["severity"], "#6b7280")
-    sev_label = {"critical": "🔴 Crítico", "high": "🟡 Alto", "medium": "🔵 Medio"}.get(issue["severity"], "⚪")
-
-    nodes_html = ""
-    node_list  = issue.get("nodes", [])
-    if node_list and len(node_list) <= 15:
-        rows = ""
-        for n in node_list:
-            if isinstance(n, dict):
-                extras = []
-                if "window"      in n: extras.append(f"ventana: {n['window']}")
-                if "duration"    in n: extras.append(f"duration: {n['duration']} min")
-                if "window_size" in n: extras.append(f"ventana disponible: {n['window_size']} min")
-                extra_str = " | ".join(extras)
-                rows += (
-                    f"<tr>"
-                    f"<td style='padding:3px 8px;font-family:monospace;font-size:11px;color:inherit'>{n.get('ident','')}</td>"
-                    f"<td style='padding:3px 8px;font-size:11px;opacity:0.7;color:inherit'>{n.get('address','')}</td>"
-                    f"<td style='padding:3px 8px;font-size:11px;opacity:0.6;color:inherit'>{extra_str}</td>"
-                    f"</tr>"
-                )
-            else:
-                rows += f"<tr><td style='padding:3px 8px;font-family:monospace;font-size:11px;color:inherit'>{n}</td></tr>"
-        if rows:
-            nodes_html = (
-                f"<table style='margin-top:8px;width:100%;border-collapse:collapse;"
-                f"border-radius:6px;overflow:hidden'>{rows}</table>"
-            )
-
-    st.markdown(f"""
-    <div class="preflight-card" style="border-left: 4px solid {sev_color};">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-            <span class="badge" style="background:{sev_color}20;color:{sev_color}">{sev_label}</span>
-            <span class="badge badge-gray"><code style="background:transparent">{issue['code']}</code></span>
-            <strong style="font-size:14px;color:inherit">{issue['title']}</strong>
-        </div>
-        <div style="font-size:13px;line-height:1.55">{issue['detail']}</div>
-        <div style="font-size:11px;opacity:0.7;margin-top:6px;">
-            Campo: <code>{issue['field']}</code> = <code>{issue['value']}</code>
-            &nbsp;|&nbsp; ✏️ {issue['fix']}
-        </div>
-        {nodes_html}
+def render_executive_summary(issues, routed, total, n_unat, n_filt):
+    critical = [i for i in issues if i.severity=="critical"]
+    pct      = round(routed/max(total,1)*100,1)
+    if not issues:
+        st.markdown("""<div class="summary-card" style="border-color:rgba(22,163,74,0.4);background:rgba(22,163,74,0.08)">
+            <div class="summary-title">✅ Sin problemas detectados</div>
+            <div class="summary-line">Todos los nodos fueron enrutados correctamente.</div>
+        </div>""", unsafe_allow_html=True)
+        return
+    bg  = "rgba(220,38,38,0.08)"  if critical else "rgba(245,158,11,0.08)"
+    brd = "rgba(220,38,38,0.4)"   if critical else "rgba(245,158,11,0.4)"
+    ico = "🔴" if critical else "🟡"
+    main_issue = issues[0]
+    extras = []
+    if len(issues)>1:
+        extras.append(f'<div class="summary-line">📋 {len(issues)-1} problema(s) adicional(es) — ver detalle abajo.</div>')
+    if n_unat or n_filt:
+        extras.append(f'<div class="summary-line">📊 Cobertura actual: <strong>{pct}%</strong> ({routed}/{total} nodos) · {n_unat} sin atender · {n_filt} filtrados.</div>')
+    st.markdown(f"""<div class="summary-card" style="border-color:{brd};background:{bg}">
+        <div class="summary-title">{ico} {len(issues)} problema(s) detectado(s)</div>
+        <div class="summary-line">📌 <strong>Principal:</strong> {main_issue.title}</div>
+        {"".join(extras)}
     </div>""", unsafe_allow_html=True)
 
 
@@ -1607,17 +703,16 @@ def render_preflight_issue(issue):
 
 def main():
     st.markdown("# 🗺️ SimpliRoute — Route Analyzer")
-    st.caption("Validación pre-vuelo · Diagnóstico de nodos sin atender · Recomendaciones priorizadas")
-
+    st.caption("Validación pre-vuelo · Nodos filtrados · Nodos sin atender · Flota")
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown('<div class="upload-label">📥 Cargar Request (JSON o cURL)</div>', unsafe_allow_html=True)
-        req_file = st.file_uploader("request", type=["json", "txt"], key="req", label_visibility="collapsed")
-    with col2:
-        st.markdown('<div class="upload-label">📤 Cargar Response (JSON o cURL)</div>', unsafe_allow_html=True)
-        res_file = st.file_uploader("response", type=["json", "txt"], key="res", label_visibility="collapsed")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**📥 Cargar Request (JSON o cURL)**")
+        req_file = st.file_uploader("request", type=["json","txt"], key="req", label_visibility="collapsed")
+    with c2:
+        st.markdown("**📤 Cargar Response (JSON o cURL)**")
+        res_file = st.file_uploader("response", type=["json","txt"], key="res", label_visibility="collapsed")
 
     if not req_file or not res_file:
         st.info("Carga ambos archivos para iniciar el análisis.")
@@ -1630,325 +725,197 @@ def main():
         st.error(f"Error al parsear los archivos: {e}")
         return
 
-    # ── PRE-FLIGHT ────────────────────────────────────────────────────────────
-    preflight_issues = validate_request(req)
-    st.markdown('<div class="section-title">🔍 Validación pre-vuelo del Request</div>', unsafe_allow_html=True)
-    if not preflight_issues:
-        st.markdown('<div class="preflight-ok">✅ Sin problemas detectados en el request.</div>', unsafe_allow_html=True)
-    else:
-        critical_count = sum(1 for i in preflight_issues if i["severity"] == "critical")
-        if critical_count:
-            st.markdown(
-                f'<div style="font-size:13px;color:#dc2626;font-weight:600;margin-bottom:8px;">'
-                f'⛔ {critical_count} problema(s) crítico(s) — pueden causar error E500</div>',
-                unsafe_allow_html=True,
-            )
-        for issue in preflight_issues:
-            render_preflight_issue(issue)
+    # ── Error response ────────────────────────────────────────────────────────
+    if is_error_response(res):
+        err_code, err_desc = "", ""
+        if "errors" in res:
+            for err in res.get("errors",[]):
+                err_code = err.get("code","")
+                err_desc = err.get("message","")
+        elif "cause" in res:
+            err_code = res.get("cause",{}).get("code","")
+            err_desc = res.get("description","")
+        id_veh = res.get("cause",{}).get("id_vehicle","") if "cause" in res else ""
+        veh_str = f" (Vehículo: {id_veh})" if id_veh else ""
+        friendly = ERROR_CODE_MESSAGES.get(err_code)
+        if friendly:
+            t, w, a = friendly
+            st.markdown(f"""<div class="error-banner">
+                <div class="error-title">⛔ {err_code} — {t}{veh_str}</div>
+                <div style="font-size:14px;margin-top:6px">{w}</div>
+                <div style="font-size:12px;margin-top:8px;font-style:italic">→ {a}</div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div class="error-banner">
+                <div class="error-title">⛔ Error del Router — {err_code}{veh_str}</div>
+                <div style="font-size:14px;margin-top:4px">{err_desc}</div>
+            </div>""", unsafe_allow_html=True)
+
+        pf = [i for i in collect_all_issues(req, res) if i.scope=="preflight"]
+        if pf:
+            st.markdown('<div class="section-title">🔍 Problemas detectados en el Request</div>', unsafe_allow_html=True)
+            for idx, issue in enumerate(pf, 1):
+                render_issue_card(issue, idx)
+        return
+
+    # ── Collect ───────────────────────────────────────────────────────────────
+    node_map   = {n["ident"]: n for n in req.get("nodes",[])}
+    unattended = res.get("unattendedClientsNodes",[])
+    filtered   = res.get("filteredClientsNodes",[])
+    veh_used   = res.get("num_vehicles_used",0)
+    total_veh  = len(req.get("vehicles",[]))
+    routed_ids = set()
+    for v in res.get("vehicles",[]):
+        for tour in v.get("tours",[]):
+            for n in tour.get("nodes",[]):
+                if not n["ident"].startswith("vehicle-"):
+                    routed_ids.add(n["ident"])
+    total  = len(req.get("nodes",[]))
+    routed = len(routed_ids)
+    n_unat = len(unattended)
+    n_filt = len(filtered)
+    pct    = round(routed/max(total,1)*100,1)
+
+    with st.spinner("Analizando..."):
+        all_issues = collect_all_issues(req, res)
+
+    pf_issues   = [i for i in all_issues if i.scope=="preflight"]
+    flt_issues  = [i for i in all_issues if i.scope=="filtered"]
+    un_issues   = [i for i in all_issues if i.scope=="unattended"]
+    flt_issues2 = [i for i in all_issues if i.scope=="fleet"]
+
+    render_executive_summary(all_issues, routed, total, n_unat, n_filt)
+
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    with c1: render_metric("Total nodos",   total)
+    with c2: render_metric("Enrutados",     routed, "#16a34a")
+    with c3: render_metric("Sin atender",   n_unat, "#ef4444" if n_unat else "inherit")
+    with c4: render_metric("Filtrados",     n_filt, "#f59e0b" if n_filt else "inherit")
+    with c5: render_metric("Tasa atención", pct,    "#1d4ed8", "%")
+    with c6: render_metric("Vehículos",     f"{veh_used}/{total_veh}")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    # ── RESPONSE DE ERROR ─────────────────────────────────────────────────────
-    if is_error_response(res):
-        # Determinar código y mensaje según el formato del response
-        err_code = ""
-        err_desc = ""
-
-        if "errors" in res:
-            # Formato E500: {"errors": [...]}
-            for err in res.get("errors", []):
-                err_code = err.get("code", "") or err.get("metadata", {}).get("code", "")
-                err_desc = err.get("message", "")
-        elif "cause" in res:
-            # Formato E03XXX / E01XXX: {"description": "...", "cause": {"code": "..."}}
-            err_code = res.get("cause", {}).get("code", "")
-            err_desc = res.get("description", "")
-
-        # Buscar mensaje amigable en el diccionario
-        friendly = ERROR_CODE_MESSAGES.get(err_code)
-        if friendly:
-            title, detail, fix = friendly
-            # Enrich with vehicle info if present in cause
-            id_vehicle = res.get("cause", {}).get("id_vehicle", "")
-            veh_info   = f" — Vehículo: `{id_vehicle}`" if id_vehicle else ""
-            st.markdown(f"""
-            <div class="error-banner">
-                <div class="error-title">⛔ {err_code} — {title}{veh_info}</div>
-                <div style="font-size:14px;color:#7f1d1d;margin-top:6px;">{detail}</div>
-                <div style="font-size:12px;color:#991b1b;margin-top:8px;">✏️ {fix}</div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="error-banner">
-                <div class="error-title">⛔ Error del Router — {err_code}</div>
-                <div style="font-size:14px;color:#7f1d1d;margin-top:4px;">{err_desc}</div>
-            </div>""", unsafe_allow_html=True)
-
-        st.warning(
-            "El router no produjo rutas. Revisa los problemas detectados en la "
-            "validación pre-vuelo — uno o más de ellos es la causa probable del error."
-        )
-        return
-
-    # ── NODOS ─────────────────────────────────────────────────────────────────
-    unattended = res.get("unattendedClientsNodes", [])
-    filtered   = res.get("filteredClientsNodes", [])
-    veh_used   = res.get("num_vehicles_used", 0)
-
-    if veh_used == 0 and (unattended or filtered):
-        st.markdown("""
-        <div class="error-banner">
-            <div class="error-title">⚠️ El router no generó ninguna ruta (num_vehicles_used = 0)</div>
-            <div style="font-size:13px;color:#7f1d1d;margin-top:4px;">
-                Todos los nodos fueron descartados antes o durante la optimización.
-            </div>
-        </div>""", unsafe_allow_html=True)
-
-    # ── filteredClientsNodes ───────────────────────────────────────────────────
-    if filtered:
-        st.markdown(
-            f'<div class="section-title">🚫 Nodos filtrados antes de optimizar ({len(filtered)})</div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("Descartados por el router ANTES de generar rutas. No aparecen en unattendedClientsNodes.")
-
-        fa = analyze_filtered_nodes(req, res)
-
-        geo_issues  = [fn for fn in fa if fn["geo_issue"]]
-        codes_all   = [c for fn in fa for c in fn["codes"]]
-        code_counts = Counter(codes_all)
-        dists       = [fn["dist_km"] for fn in fa if fn["dist_km"]]
-        avg_dist    = round(sum(dists) / len(dists), 1) if dists else None
-
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        with mc1: render_metric("Total filtrados",      len(filtered),       "#dc2626")
-        with mc2: render_metric("Con problema geo",     len(geo_issues),     "#f59e0b" if geo_issues else "#16a34a")
-        with mc3: render_metric("Dist. promedio (km)",  avg_dist or "—")
-        with mc4: render_metric("Código más frecuente", code_counts.most_common(1)[0][0] if code_counts else "—")
-
-        if len(geo_issues) == len(fa):
-            st.error(
-                "🗺️ **Todos los nodos tienen incompatibilidad geográfica.** "
-                "El vehículo parte de una ubicación demasiado lejana. "
-                "Verificar que el punto de inicio corresponda a la misma ciudad/región que las visitas."
-            )
-        elif geo_issues:
-            st.warning(f"🗺️ {len(geo_issues)} de {len(fa)} nodos tienen incompatibilidad geográfica.")
-
-        rows = []
-        for fn in fa:
-            rows.append({
-                "Ident":          fn["ident"],
-                "Dirección":      fn["address"],
-                "Código":         ", ".join(fn["codes"]),
-                "Vehículo ref.":  fn["nearest_v"] or "—",
-                "Dist. veh (km)": fn["dist_km"],
-                "Problema geo":   "Sí" if fn["geo_issue"] else "No",
-                "Diagnóstico":    fn["geo_detail"] if fn["geo_detail"] else (
-                    "W00001: revisar coordenadas o configuración del país"
-                    if "W00001" in fn["codes"] else "—"
-                ),
-                "Load 1": fn["load"], "Load 2": fn["load_2"], "Load 3": fn["load_3"],
-            })
-
-        df_filtered = pd.DataFrame(rows)
-        st.dataframe(df_filtered, use_container_width=True, hide_index=True)
-
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_filtered.to_excel(writer, index=False, sheet_name="Nodos Filtrados")
-        buffer.seek(0)
-        st.download_button(
-            label="📥 Descargar detalle en Excel",
-            data=buffer,
-            file_name="nodos_filtrados.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    # ── Pre-flight ────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🔍 Validación pre-vuelo del Request</div>', unsafe_allow_html=True)
+    if pf_issues:
+        crit = sum(1 for i in pf_issues if i.severity=="critical")
+        if crit:
+            st.markdown(f'<div style="font-size:13px;color:#ef4444;font-weight:600;margin-bottom:8px">⛔ {crit} problema(s) crítico(s) detectado(s)</div>', unsafe_allow_html=True)
+        for idx, issue in enumerate(pf_issues, 1):
+            render_issue_card(issue, idx)
+    else:
+        st.markdown('<div style="background:rgba(22,163,74,0.1);border:1px solid rgba(22,163,74,0.3);border-radius:10px;padding:12px 16px;font-size:13px;font-weight:500">✅ Sin problemas detectados en el request.</div>', unsafe_allow_html=True)
 
     if not unattended and not filtered:
-        st.success("✅ No hay nodos sin atender ni filtrados en este response.")
+        st.success("✅ Todos los nodos fueron enrutados correctamente.")
         return
+
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+    # ── Filtered ──────────────────────────────────────────────────────────────
+    if filtered:
+        st.markdown(f'<div class="section-title">🚫 Nodos descartados antes de optimizar ({n_filt})</div>', unsafe_allow_html=True)
+        for issue in flt_issues:
+            render_issue_card(issue)
+        rows = []
+        for fn in filtered:
+            ident    = fn["ident"]
+            req_node = node_map.get(ident,{})
+            cause    = fn.get("cause",{})
+            codes    = cause.get("codes",[]) if isinstance(cause,dict) else []
+            rows.append({"Ident":ident,"Dirección":req_node.get("address","")[:60],
+                         "Código":", ".join(codes) if codes else "—",
+                         "Load":fn.get("load",0),"Skill opt.":str(req_node.get("skills_optional",[]))})
+        with st.expander("Ver tabla completa de nodos filtrados"):
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as w:
+                df.to_excel(w, index=False)
+            buf.seek(0)
+            st.download_button("📥 Descargar Excel", buf, "filtrados.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     if not unattended:
         return
 
-    # ── ANÁLISIS NODOS SIN ATENDER ────────────────────────────────────────────
-    with st.spinner("Analizando..."):
-        findings = analyze(req, res)
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    s = findings["summary"]
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    with c1: render_metric("Total nodos",     s["total_nodes"])
-    with c2: render_metric("Enrutados",        s["routed_nodes"],     "#16a34a")
-    with c3: render_metric("Sin atender",      s["unattended_count"], "#dc2626")
-    with c4: render_metric("Tasa atención",    s["attendance_rate"],  "#1d4ed8", "%")
-    with c5: render_metric("Vehículos usados", f"{s['vehicles_used']}/{s['total_vehicles']}")
-    with c6: render_metric("SO-002 / SO-003",  f"{s['so002']} / {s['so003']}")
-
-    # Alerta max_visit
-    if s.get("max_visit_global") and s.get("vehicles_at_max", 0) > 0:
-        st.warning(
-            f"🔢 **max_visit={s['max_visit_global']}** — {s['vehicles_at_max']} vehículo(s) llegaron al tope. "
-            f"{s['vehicles_idle']} vehículo(s) sin visitas asignadas."
-        )
-
-    st.markdown('<div class="section-title">🎯 Recomendaciones priorizadas</div>', unsafe_allow_html=True)
-    if not findings["recommendations"]:
-        st.info("No se generaron recomendaciones.")
+    # ── Unattended ────────────────────────────────────────────────────────────
+    st.markdown(f'<div class="section-title">⚠️ Nodos sin atender ({n_unat})</div>', unsafe_allow_html=True)
+    if un_issues:
+        for idx, issue in enumerate(un_issues, 1):
+            render_issue_card(issue, idx)
     else:
-        for idx, rec in enumerate(findings["recommendations"], 1):
-            render_recommendation(rec, idx)
-
-    # ── ANÁLISIS COMPARATIVO ──────────────────────────────────────────────────
-    comp = comparative_analysis(req, res)
-    if comp:
-        st.markdown('<div class="section-title">🔬 Análisis comparativo: enrutados vs sin atender</div>', unsafe_allow_html=True)
-
-        r = comp["routed_stats"]
-        u = comp["unatt_stats"]
-
-        # Tabla comparativa
-        comp_rows = [
-            {"Campo": "Nodos", "Enrutados": r["count"], "Sin atender": u["count"], "Diferencia": "—"},
-            {"Campo": "Load promedio",    "Enrutados": r["load_mean"],   "Sin atender": u["load_mean"],   "Diferencia": f"{r['load_mean']/max(u['load_mean'],0.01):.1f}×" if u["load_mean"] > 0 else "—"},
-            {"Campo": "Load mediana",     "Enrutados": r["load_median"], "Sin atender": u["load_median"], "Diferencia": "—"},
-            {"Campo": "Duration promedio","Enrutados": f"{r['dur_mean']} min",  "Sin atender": f"{u['dur_mean']} min",  "Diferencia": "—"},
-            {"Campo": "Ventana promedio", "Enrutados": f"{r['window_mean']} min","Sin atender": f"{u['window_mean']} min","Diferencia": "—"},
-        ]
-        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
-
-        # Diferenciadores detectados
-        if comp["differentiators"]:
-            for d in comp["differentiators"]:
-                sev_color = "#ef4444" if d["severity"] == "high" else "#f59e0b"
-                st.markdown(f"""
-                <div class="rec-card" style="border-left: 4px solid {sev_color};">
-                    <div class="rec-title">🔍 Diferenciador: {d['field']}</div>
-                    <div class="rec-detail">
-                        <b>Enrutados:</b> {d['routed']} &nbsp;|&nbsp;
-                        <b>Sin atender:</b> {d['unattended']} &nbsp;|&nbsp;
-                        <b>Ratio:</b> {d['diff']}<br><br>
-                        {d['conclusion']}
-                    </div>
-                    <div class="rec-field">✏️ {d['fix']}</div>
-                </div>""", unsafe_allow_html=True)
-        else:
-            st.info("No se detectó un diferenciador claro entre ambos grupos. Los grupos son estadísticamente similares en carga, duración y ventana.")
-
-    # ── UTILIZACIÓN DE FLOTA ──────────────────────────────────────────────────
-    fleet = fleet_utilization(req, res)
-    if fleet:
-        st.markdown('<div class="section-title">🚛 Utilización de flota</div>', unsafe_allow_html=True)
-
-        f1, f2, f3, f4, f5 = st.columns(5)
-        with f1: render_metric("Vehículos activos",  fleet["active"])
-        with f2: render_metric("Vehículos inactivos", fleet["idle"], "#f59e0b" if fleet["alert_idle"] else "#6b7280")
-        with f3: render_metric("Visitas promedio/veh", fleet["avg_visits"])
-        with f4: render_metric("Máx visitas/veh",    fleet["max_visits"])
-        with f5: render_metric("Al 90%+ capacidad",  fleet["at_cap"], "#ef4444" if fleet["alert_at_cap"] else "#6b7280")
-
-        # Alertas sistémicas
-        if fleet["alert_single"]:
-            st.error(
-                f"⚠️ **{fleet['single_visit_ratio']:.0f}% de los vehículos activos hicieron exactamente 1 visita.** "
-                f"Esto indica que los vehículos no pueden encadenar visitas — posiblemente por ventanas de tiempo "
-                f"demasiado estrechas o ubicaciones de inicio alejadas de los nodos."
-            )
-        if fleet["alert_idle"]:
-            st.warning(
-                f"🚛 **{fleet['idle']} vehículos ({fleet['idle']/max(fleet['total'],1)*100:.0f}%) no realizaron ninguna visita.** "
-                f"Revisar si sus ubicaciones de inicio o turnos son compatibles con los nodos disponibles."
-            )
-        if fleet["alert_at_cap"]:
-            st.error(
-                f"⚖️ **{fleet['at_cap']} vehículos llegaron al 90%+ de su capacidad de carga.** "
-                f"La capacidad de la flota puede ser insuficiente para absorber todos los nodos."
-            )
-
-        # Tabla por vehículo (solo activos)
-        with st.expander("Ver detalle por vehículo", expanded=False):
-            veh_rows = []
-            for vid, vd in sorted(fleet["veh_data"].items(), key=lambda x: -x[1]["visits"]):
-                cap_str = f"{vd['cap_pct']}%" if vd["cap_pct"] is not None else "cap. ilimitada"
-                veh_rows.append({
-                    "Vehículo":      vid,
-                    "Visitas":       vd["visits"],
-                    "Carga total":   vd["load1"],
-                    "Capacidad":     vd["cap1"] if vd["cap1"] < 1e15 else "ilimitada",
-                    "% Capacidad":   cap_str,
-                    "Estado":        "🔴 Al límite" if vd["at_cap"] else ("🟢 Activo" if vd["visits"] > 0 else "⚪ Inactivo"),
-                })
-            st.dataframe(pd.DataFrame(veh_rows), use_container_width=True, hide_index=True)
-
-    st.markdown('<div class="section-title">📊 Análisis por zona</div>', unsafe_allow_html=True)
-    zone_rows = []
-    for z, zs in findings["zone_stats"].items():
-        zone_rows.append({
-            "Zona":                str(z),
-            "Nodos":               zs["total_nodes"],
-            "Vehículos":           zs["num_vehicles"],
-            "Dur. total (min)":    zs["total_dur"],
-            "Ventana/veh (min)":   zs["avail_min_veh"]  if zs["avail_min_veh"]  > 0 else "—",
-            "Ventana total (min)": zs["avail_min"]       if zs["avail_min"]      > 0 else "—",
-            "Turno":               f"{zs['shift_info'][0]}–{zs['shift_info'][1]}",
-            "Outliers duration":   zs["outlier_count"],
-            "Desborde":            "🔴 Sí" if zs["overflow"] else "🟢 No",
-        })
-    st.dataframe(pd.DataFrame(zone_rows), use_container_width=True, hide_index=True)
-
-    st.markdown('<div class="section-title">📋 Tabla de nodos sin atender</div>', unsafe_allow_html=True)
-    with st.expander("Ver tabla completa", expanded=False):
-        rows = []
-        for n in findings["unattended"]:
-            icon, label, _ = ISSUE_LABELS.get(n["primary_type"], ("❓", n["primary_type"], "badge-gray"))
-            rows.append({
-                "Ident":              n["ident"],
-                "Dirección":          n["address"],
-                "Causa router":       n["cause_code"],
-                "Problema principal": f"{icon} {label}",
-                "Zona(s)":            str(n["zones"]) if n["zones"] else "sin zona",
-                "Duration":           n["duration"],
-                "Ventana":            n["window"],
-                "Load 1/2/3":         f"{n['load']:.1f} / {n['load_2']:.2f} / {n['load_3']:.1f}",
-                "# Problemas":        len(n["issues"]),
-            })
+        st.info("No se detectaron causas específicas. Revisar configuración general.")
+    rows = [{"Ident":un["ident"],"Dirección":node_map.get(un["ident"],{}).get("address","")[:60],
+             "Causa":un.get("cause",{}).get("code",""),
+             "Zona(s)":str(node_map.get(un["ident"],{}).get("zones",[])),
+             "Duration":node_map.get(un["ident"],{}).get("duration"),
+             "Ventana":f"{node_map.get(un['ident'],{}).get('window_start')}–{node_map.get(un['ident'],{}).get('window_end')}",
+             "Load":f"{un.get('load',0):.1f}"} for un in unattended]
+    with st.expander("Ver tabla completa de nodos sin atender"):
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    st.markdown('<div class="section-title">🔎 Diagnóstico por nodo</div>', unsafe_allow_html=True)
-    for n in findings["unattended"]:
-        icon, label, _ = ISSUE_LABELS.get(n["primary_type"], ("❓", n["primary_type"], "badge-gray"))
-        header = f"{icon} **{n['ident']}** — {n['address'][:55]}{'…' if len(n['address'])>55 else ''}"
-        with st.expander(header, expanded=False):
-            ca, cb = st.columns([3, 2])
-            with ca:
-                st.markdown(
-                    f"**Zona(s):** {n['zones'] or 'sin zona'}  \n"
-                    f"**Causa router:** `{n['cause_code']}`  \n"
-                    f"**Ventana:** `{n['window']}`  \n"
-                    f"**Duration:** `{n['duration']} min`"
-                )
-            with cb:
-                st.markdown(
-                    f"**Load 1:** {n['load']:.2f}  \n"
-                    f"**Load 2:** {n['load_2']:.3f}  \n"
-                    f"**Load 3:** {n['load_3']:.2f}"
-                )
-            st.markdown("---")
-            for iss in n["issues"]:
-                sev_icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(iss["severity"], "⚪")
-                i_icon, i_label, _ = ISSUE_LABELS.get(iss["type"], ("❓", iss["type"], "badge-gray"))
-                st.markdown(
-                    f"{sev_icon} **{i_icon} {i_label}** — `{iss['field']}` = `{iss['value']}`  \n"
-                    f"&nbsp;&nbsp;&nbsp;{iss['detail']}  \n"
-                    f"&nbsp;&nbsp;&nbsp;✏️ *{iss.get('fix', '')}*"
-                )
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+    # ── Fleet ─────────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">🚛 Utilización de flota</div>', unsafe_allow_html=True)
+    if flt_issues2:
+        for issue in flt_issues2:
+            render_issue_card(issue)
+    vrows = []
+    for v_res in res.get("vehicles",[]):
+        vid   = v_res["ident"]
+        v_req = next((v for v in req.get("vehicles",[]) if v["ident"]==vid), {})
+        visits= sum(1 for t in v_res.get("tours",[]) for n in t.get("nodes",[]) if not n["ident"].startswith("vehicle-"))
+        load1 = sum(node_map.get(n["ident"],{}).get("load",0) or 0 for t in v_res.get("tours",[]) for n in t.get("nodes",[]) if not n["ident"].startswith("vehicle-"))
+        cap1  = v_req.get("capacity",0) or 0
+        pct_c = round(load1/cap1*100,1) if cap1 and cap1<1e15 else None
+        vrows.append({"Vehículo":vid,"Visitas":visits,"Carga":round(load1,1),
+                      "Capacidad":cap1 if cap1<1e15 else "ilimitada",
+                      "% Cap.":f"{pct_c}%" if pct_c is not None else "—",
+                      "Estado":"🟢 Activo" if visits>0 else "⚪ Inactivo"})
+    st.dataframe(pd.DataFrame(vrows), use_container_width=True, hide_index=True)
+
+    # ── Comparative ───────────────────────────────────────────────────────────
+    r_nodes = [node_map[i] for i in routed_ids if i in node_map]
+    u_nodes = [node_map[u["ident"]] for u in unattended if u["ident"] in node_map]
+    if r_nodes and u_nodes:
+        st.markdown('<div class="section-title">🔬 Análisis comparativo</div>', unsafe_allow_html=True)
+        def win_min(n):
+            try:
+                ws,we = n.get("window_start",""), n.get("window_end","")
+                h1,m1 = int(ws.split(":")[0]),int(ws.split(":")[1])
+                h2,m2 = int(we.split(":")[0]),int(we.split(":")[1])
+                return (h2*60+m2)-(h1*60+m1)
+            except: return None
+
+        r_l = [n.get("load",0) for n in r_nodes]
+        u_l = [n.get("load",0) for n in u_nodes]
+        r_d = [d for n in r_nodes if (d:=try_int(n.get("duration"))) is not None]
+        u_d = [d for n in u_nodes if (d:=try_int(n.get("duration"))) is not None]
+        r_w = [w for n in r_nodes if (w:=win_min(n)) is not None]
+        u_w = [w for n in u_nodes if (w:=win_min(n)) is not None]
+
+        st.dataframe(pd.DataFrame([
+            {"Campo":"Nodos","Enrutados":len(r_nodes),"Sin atender":len(u_nodes),"Diferencia":"—"},
+            {"Campo":"Load promedio","Enrutados":avg(r_l),"Sin atender":avg(u_l),
+             "Diferencia":f"{avg(r_l)/max(avg(u_l),0.01):.1f}×" if avg(u_l)>0 else "—"},
+            {"Campo":"Duration promedio","Enrutados":f"{avg(r_d)} min","Sin atender":f"{avg(u_d)} min","Diferencia":"—"},
+            {"Campo":"Ventana promedio","Enrutados":f"{avg(r_w)} min","Sin atender":f"{avg(u_w)} min","Diferencia":"—"},
+        ]), use_container_width=True, hide_index=True)
+
+        if avg(r_l)>0 and avg(u_l)>0 and avg(r_l)/max(avg(u_l),0.01)>2:
+            ratio = avg(r_l)/max(avg(u_l),0.01)
+            st.info(f"🔍 **Diferenciador — Carga:** Los nodos enrutados tienen {ratio:.1f}× más carga ({avg(r_l):.0f} vs {avg(u_l):.0f}). El router priorizó los de mayor carga.")
+        elif avg(r_w)>0 and avg(u_w)>0 and avg(r_w)/max(avg(u_w),0.01)>1.5:
+            ratio = avg(r_w)/max(avg(u_w),0.01)
+            st.info(f"🔍 **Diferenciador — Ventana:** Los nodos enrutados tienen ventanas {ratio:.1f}× más amplias ({avg(r_w):.0f} vs {avg(u_w):.0f} min).")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    st.markdown(
-        '<div style="font-size:12px;color:#9ca3af;text-align:center;">'
-        'SimpliRoute Route Analyzer v2 · E01/E02/E03/E99 + max_visit + geo distance'
-        '</div>', unsafe_allow_html=True,
-    )
+    st.markdown('<div style="font-size:11px;opacity:0.4;text-align:center">SimpliRoute Route Analyzer v3 · Issue Registry centralizado</div>', unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
