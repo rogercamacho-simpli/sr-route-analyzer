@@ -544,10 +544,8 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
             w00001_f))
     # FILTERED_OTHER eliminado — no aporta valor cuando la causa ya está en pre-vuelo
 
-    # ─── 3. UNATTENDED ───────────────────────────────────────────────────────
-    # Construir mapa de nodos explicados por pre-vuelo
+    # ─── 3. UNATTENDED — detección multi-causa por nodo ─────────────────────
     pf_issues_so_far = [i for i in issues if i.scope == "preflight"]
-    explained_map = build_explained_map(pf_issues_so_far, nodes, all_veh_skills, vehicles_no_zone, all_veh_zones, autozone)
     zone_nodes = defaultdict(list)
     for n in nodes:
         z_list = n.get("zones",[])
@@ -566,141 +564,203 @@ def collect_all_issues(req: dict, res: dict) -> List[Issue]:
             if ssm and sem and sum(durs) > (sem-ssm)*len(veh_ids):
                 zone_overflow.add(z)
 
-    cause_groups: dict = defaultdict(list)
-    explained_groups: dict = defaultdict(list)  # preflight_code -> [nodes]
-
-    for un in unattended:
-        ident      = un["ident"]
-        req_node   = node_map.get(ident,{})
-        cause_code = un.get("cause",{}).get("code","")
-        nz         = req_node.get("zones",[])
-        dur        = try_int(req_node.get("duration"))
-        ws, we     = req_node.get("window_start","00:00"), req_node.get("window_end","23:59")
-        ws_m, we_m = parse_time(ws), parse_time(we)
-        addr       = req_node.get("address","")[:60]
-        info       = {"ident":ident,"address":addr,"extra":f"load={un.get('load',0):.1f} | dur={dur} | {ws}–{we}"}
-
-        # Si el pre-vuelo ya explica por qué este nodo quedó fuera, usamos esa causa
-        if ident in explained_map:
-            pf_issue = explained_map[ident]
-            explained_groups[pf_issue.code].append((info, pf_issue))
-            continue
-
-        detected = None
-        if ws==we and dur and dur>0:
-            detected = "zero_window"
-        elif ws_m and we_m and dur and 0<(we_m-ws_m)<dur:
-            detected = "narrow_window"
-        elif ws_m and we_m and dur and (we_m-ws_m)==dur:
-            detected = "tight_window"
-        elif dur and any(dur in zone_outliers.get(z,set()) for z in (nz if nz else ["sin_zona"])):
-            detected = "duration_outlier"
-        elif any(z in zone_overflow for z in (nz if nz else ["sin_zona"])):
-            detected = "zone_overflow"
-        elif nz and not any(time_overlap(ws,we,veh_map[v].get("shift_start","00:01"),veh_map[v].get("shift_end","23:59"))
-                            for z in nz for v in zone_to_vehicles.get(z,[]) if v in veh_map):
-            detected = "window_shift_mismatch"
-        elif nz and not autozone and vehicles_no_zone and all_veh_zones:
-            detected = "inactive_vehicles_no_zone"
-        elif not nz and not autozone and all_veh_zones and not vehicles_no_zone:
-            detected = "nodes_no_zone"
-        elif max_visit_global and vehicles_at_max:
-            detected = "max_visit_limit"
-        elif vehicle_last_state:
-            nlat, nlon = req_node.get("lat"), req_node.get("lon")
-            if nlat and nlon:
-                for vs in vehicle_last_state.values():
-                    if (haversine_km(vs["lat"],vs["lon"],nlat,nlon)/60*60)+(dur or 0) > vs["remaining"]:
-                        detected = "shift_time_exhausted"
-                        break
-        if not detected:
-            detected = "exc_so_002" if cause_code=="EXC_SO-002" else "exc_so_001" if cause_code=="EXC_SO-001" else "cap_time_general"
-
-        cause_groups[detected].append(info)
-
-    # Nodos explicados por pre-vuelo → un Issue por causa sistémica
-    for pf_code, nodes_and_issues in explained_groups.items():
-        pf_issue  = nodes_and_issues[0][1]
-        aff_nodes = [n for n, _ in nodes_and_issues]
-        issues.append(Issue(
-            code    = f"PREFLIGHT_{pf_code}",
-            scope   = "unattended",
-            severity= pf_issue.severity,
-            title   = f"{pf_issue.title} — {len(aff_nodes)} nodo(s) sin atender",
-            why     = pf_issue.why,
-            action  = pf_issue.action,
-            affected= aff_nodes,
-        ))
-
-    defs = {
-        "zero_window":   ("critical","Ventana de 0 minutos — imposible agendar la visita",
-            "window_start == window_end con duration > 0. No hay espacio temporal para el servicio.",
-            "Ampliar window_end o establecer duration=0 en los nodos afectados."),
-        "narrow_window": ("high","Ventana más pequeña que la duración — el servicio no cabe",
-            "La ventana disponible es menor al tiempo de servicio. Físicamente imposible atenderlos.",
-            "Ampliar window_end o reducir duration en los nodos afectados."),
-        "tight_window":  ("high","Ventana igual a la duración — sin margen para el traslado",
-            "La ventana cubre exactamente el servicio pero no deja tiempo para llegar y salir.",
-            "Ampliar window_end al menos 15–30 min más allá de la duración de servicio."),
-        "duration_outlier":("high","Duración de servicio atípica — desborda el tiempo disponible de la zona",
-            "La duration es estadísticamente anormal vs el resto de la zona y causa desborde temporal.",
-            "Verificar y corregir la duration al tiempo real de servicio."),
-        "zone_overflow": ("high","Tiempo total de servicio en la zona excede el turno disponible",
-            "La suma de durations de todos los nodos supera el tiempo total de los vehículos asignados a la zona.",
-            "Corregir durations, agregar un vehículo a la zona, o ampliar el turno."),
-        "window_shift_mismatch":("high","Ventana horaria incompatible con el turno del vehículo",
-            "La ventana del nodo no se solapa con el turno de ningún vehículo candidato.",
-            "Ajustar window_start/window_end del nodo o el shift del vehículo."),
-        "inactive_vehicles_no_zone":("high",
-            f"Vehículos inactivos — {len(vehicles_no_zone)} vehículo(s) con zones=[] no pueden atender nodos con zona",
-            f"Con autoZone=false, los vehículos sin zona asignada no pueden atender ningún nodo de zona.",
-            "Asignar las zonas correspondientes a los vehículos inactivos."),
-        "nodes_no_zone": ("medium","Nodos sin zona — atendidos solo si sobra capacidad",
-            "Con autoZone=false, el router prioriza nodos de zona. Los sin zona compiten por el sobrante.",
-            "Asignar la zona correcta a los nodos, o agregar un vehículo con zones=[]."),
-        "max_visit_limit":("medium",
-            f"Límite max_visit={max_visit_global} alcanzado — vehículos sin cupo para más visitas",
-            f"{len(vehicles_at_max)} vehículo(s) llegaron al tope aunque tienen tiempo y capacidad disponibles.",
-            f"Aumentar max_visit por encima de {max_visit_global} o redistribuir carga."),
-        "shift_time_exhausted":("high","Turno insuficiente — el vehículo no alcanza a llegar a tiempo",
-            "El vehículo más cercano ya completó su ruta y no tiene tiempo para llegar, atender y salir.",
-            "Ampliar el turno del vehículo o asignar un vehículo adicional en este sector."),
-        "exc_so_002": (
-            "low" if beauty_on else "medium",
-            "Descartado por el optimizador para mejorar la calidad global de las rutas" if not beauty_on
-            else "Descartado por beauty=true — el router priorizó rutas más agrupadas",
-            "El nodo fue excluido porque incluirlo empeoraría la solución actual. Tiene tiempo y capacidad disponibles." if not beauty_on
-            else "Con beauty=true el router excluye nodos que generarían cruces o rutas dispersas.",
-            "Agregar un vehículo adicional o revisar la distribución geográfica." if not beauty_on
-            else "Probar con beauty=false para priorizar la cobertura sobre la estética de la ruta."),
-        "exc_so_001": ("high","Descartado antes de optimizar — incompatibilidad de ventana (EXC_SO-001)",
-            "Ningún vehículo puede alcanzar este nodo dentro de su ventana horaria.",
-            "Ampliar la ventana de tiempo o revisar el turno de los vehículos candidatos."),
-        "cap_time_general":("medium","Sin causa específica detectada — combinación de restricciones",
-            "La herramienta no identificó un patrón concreto. El nodo quedó fuera por falta de tiempo o capacidad.",
-            "Revisar carga, duración y ventanas del nodo. Considerar agregar un vehículo."),
+    # ctx shared across nodes
+    ctx = {
+        "veh_map": veh_map, "zone_to_vehicles": zone_to_vehicles,
+        "zone_overflow": zone_overflow, "zone_outliers": zone_outliers,
+        "vehicles_no_zone": vehicles_no_zone, "all_veh_zones": all_veh_zones,
+        "autozone": autozone, "beauty_on": beauty_on,
+        "max_visit_global": max_visit_global, "vehicles_at_max": vehicles_at_max,
+        "vehicle_last_state": vehicle_last_state,
     }
 
-    for key, nodes_list in cause_groups.items():
-        if key not in defs:
-            continue
-        sev, title, why, action = defs[key]
-        issues.append(Issue(key.upper(),"unattended",sev,
-            f"{title} — {len(nodes_list)} nodo(s)",
-            why, action, nodes_list))
+    CAUSE_DEFS = {
+        "zero_window":    ("critical","Ventana de 0 minutos — imposible agendar la visita",
+            "window_start == window_end con duration > 0. No hay espacio temporal para el servicio.",
+            "Ampliar window_end o establecer duration=0."),
+        "narrow_window":  ("high","Ventana más pequeña que la duración — el servicio no cabe",
+            "La ventana disponible es menor al tiempo de servicio.",
+            "Ampliar window_end o reducir duration."),
+        "tight_window":   ("high","Ventana igual a la duración — sin margen para el traslado",
+            "La ventana cubre exactamente el servicio pero no deja tiempo para llegar y salir.",
+            "Ampliar window_end al menos 15–30 min adicionales."),
+        "duration_outlier":("high","Duración atípica — desborda el tiempo disponible de la zona",
+            "La duration es estadísticamente anormal y causa desborde temporal en la zona.",
+            "Verificar y corregir la duration al tiempo real de servicio."),
+        "zone_overflow":  ("high","Tiempo total de servicio supera el turno en la zona",
+            "La suma de durations supera el tiempo total de los vehículos asignados.",
+            "Corregir durations, agregar vehículo a la zona, o ampliar el turno."),
+        "window_shift_mismatch": ("high","Ventana incompatible con el turno del vehículo",
+            "La ventana del nodo no se solapa con el turno de ningún vehículo candidato.",
+            "Ajustar window_start/window_end o el shift del vehículo."),
+        "inactive_vehicles_no_zone": ("high",
+            "Vehículo(s) sin zona no pueden atender nodos con zona asignada",
+            f"Con autoZone=false, los {len(vehicles_no_zone)} vehículo(s) con zones=[] no pueden atender este nodo.",
+            "Asignar las zonas a los vehículos inactivos."),
+        "nodes_no_zone":  ("medium","Nodo sin zona — atendido solo si sobra capacidad",
+            "Con autoZone=false, el router prioriza nodos con zona. Este compite por el sobrante.",
+            "Asignar la zona correcta al nodo, o agregar un vehículo con zones=[]."),
+        "max_visit_limit":("medium",
+            f"Límite max_visit={max_visit_global} — vehículos sin cupo",
+            f"{len(vehicles_at_max)} vehículo(s) llegaron al tope de {max_visit_global} visitas.",
+            f"Aumentar max_visit o redistribuir carga."),
+        "shift_exhausted":("high","Turno agotado — el vehículo no alcanza a llegar",
+            "El vehículo más cercano completó su ruta sin tiempo para llegar, atender y salir.",
+            "Ampliar el turno o asignar un vehículo adicional en este sector."),
+        "exc_so_002":     ("low" if beauty_on else "medium",
+            "Descartado por beauty=true — rutas más agrupadas priorizadas" if beauty_on
+            else "Descartado — incluirlo empeoraría la solución global",
+            "Con beauty=true el router excluye nodos que generarían cruces." if beauty_on
+            else "El nodo tiene tiempo y capacidad pero afectaría la calidad de otras rutas.",
+            "Probar con beauty=false." if beauty_on else "Agregar un vehículo o revisar la distribución."),
+        "exc_so_001":     ("high","Excluido antes de optimizar — ventana incompatible (EXC_SO-001)",
+            "Ningún vehículo puede alcanzar este nodo dentro de su ventana horaria.",
+            "Ampliar la ventana o revisar el turno de los vehículos."),
+        "cap_time_general":("medium","Sin causa específica identificada",
+            "El nodo quedó fuera por una combinación de restricciones de tiempo o capacidad.",
+            "Revisar carga, duración y ventanas. Considerar agregar un vehículo."),
+    }
 
-    # ─── 4. FLEET ────────────────────────────────────────────────────────────
+    def get_node_primary_cause(ident, req_node, un_node, pf_issues, ctx):
+        nz     = req_node.get("zones",[])
+        dur    = try_int(req_node.get("duration"))
+        ws, we = req_node.get("window_start","00:00"), req_node.get("window_end","23:59")
+        ws_m, we_m = parse_time(ws), parse_time(we)
+        cause_code = un_node.get("cause",{}).get("code","")
+        candidates = []  # (priority, key, pf_or_None, sev, title, why, action)
+
+        # Pre-flight causes — solo si aplican específicamente a ESTE nodo
+        for pf in pf_issues:
+            if pf.code == "W02102":
+                try:
+                    skill = int(pf.value.replace("skill","").strip())
+                    if skill in req_node.get("skills_optional",[]):
+                        candidates.append((0,"pf_w02102",pf,pf.severity,pf.title,pf.why,pf.action))
+                except Exception:
+                    pass
+            elif pf.code == "MIN_LOAD_IMPOSSIBLE":
+                vid = pf.value.replace("veh","").strip()
+                v   = ctx["veh_map"].get(vid,{})
+                vz  = set(v.get("zones",[]))
+                if ctx["autozone"] or not set(nz) or (set(nz) & vz):
+                    candidates.append((0,"pf_min_load",pf,pf.severity,pf.title,pf.why,pf.action))
+            elif pf.code == "E03004":
+                try:
+                    import ast as _ast
+                    uncovered = set(_ast.literal_eval(pf.value))
+                    if any(z in uncovered for z in nz):
+                        candidates.append((0,"pf_e03004",pf,pf.severity,pf.title,pf.why,pf.action))
+                except Exception:
+                    pass
+            elif pf.code == "NODES_NO_ZONE" and not nz and not ctx["autozone"]:
+                candidates.append((0,"pf_nodes_no_zone",pf,pf.severity,pf.title,pf.why,pf.action))
+            elif pf.code == "E03005":
+                candidates.append((0,"pf_e03005",pf,pf.severity,pf.title,pf.why,pf.action))
+
+        # Causas específicas del nodo
+        if ws == we and dur and dur > 0:
+            d = CAUSE_DEFS["zero_window"]
+            candidates.append((1,"zero_window",None,d[0],d[1],d[2],d[3]))
+        elif ws_m and we_m and dur:
+            win = we_m - ws_m
+            if 0 < win < dur:
+                d = CAUSE_DEFS["narrow_window"]
+                candidates.append((1,"narrow_window",None,d[0],d[1],d[2],d[3]))
+            elif win == dur:
+                d = CAUSE_DEFS["tight_window"]
+                candidates.append((1,"tight_window",None,d[0],d[1],d[2],d[3]))
+
+        if dur and any(dur in ctx["zone_outliers"].get(z,set()) for z in (nz if nz else ["sin_zona"])):
+            d = CAUSE_DEFS["duration_outlier"]
+            candidates.append((2,"duration_outlier",None,d[0],d[1],d[2],d[3]))
+
+        if any(z in ctx["zone_overflow"] for z in (nz if nz else ["sin_zona"])):
+            d = CAUSE_DEFS["zone_overflow"]
+            candidates.append((2,"zone_overflow",None,d[0],d[1],d[2],d[3]))
+
+        if nz and not any(
+            time_overlap(ws,we,ctx["veh_map"][v].get("shift_start","00:01"),
+                         ctx["veh_map"][v].get("shift_end","23:59"))
+            for z in nz for v in ctx["zone_to_vehicles"].get(z,[]) if v in ctx["veh_map"]
+        ):
+            d = CAUSE_DEFS["window_shift_mismatch"]
+            candidates.append((2,"window_shift_mismatch",None,d[0],d[1],d[2],d[3]))
+
+        if nz and not ctx["autozone"] and ctx["vehicles_no_zone"] and ctx["all_veh_zones"]:
+            d = CAUSE_DEFS["inactive_vehicles_no_zone"]
+            candidates.append((3,"inactive_vehicles_no_zone",None,d[0],d[1],d[2],d[3]))
+
+        if not nz and not ctx["autozone"] and ctx["all_veh_zones"] and not ctx["vehicles_no_zone"]:
+            d = CAUSE_DEFS["nodes_no_zone"]
+            candidates.append((3,"nodes_no_zone",None,d[0],d[1],d[2],d[3]))
+
+        if ctx["max_visit_global"] and ctx["vehicles_at_max"]:
+            d = CAUSE_DEFS["max_visit_limit"]
+            candidates.append((3,"max_visit_limit",None,d[0],d[1],d[2],d[3]))
+
+        nlat, nlon = req_node.get("lat"), req_node.get("lon")
+        if nlat and nlon and ctx["vehicle_last_state"]:
+            for vs in ctx["vehicle_last_state"].values():
+                if (haversine_km(vs["lat"],vs["lon"],nlat,nlon)/60*60)+(dur or 0) > vs["remaining"]:
+                    d = CAUSE_DEFS["shift_exhausted"]
+                    candidates.append((3,"shift_exhausted",None,d[0],d[1],d[2],d[3]))
+                    break
+
+        if not candidates:
+            key = "exc_so_002" if cause_code=="EXC_SO-002" else "exc_so_001" if cause_code=="EXC_SO-001" else "cap_time_general"
+            d = CAUSE_DEFS[key]
+            candidates.append((5,key,None,d[0],d[1],d[2],d[3]))
+
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0]  # (priority, key, pf, sev, title, why, action)
+
+    # Agrupar nodos por causa primaria
+    grouped = defaultdict(lambda: {"items":[], "sev":"low", "title":"", "why":"", "action":""})
+    for un in unattended:
+        ident    = un["ident"]
+        req_node = node_map.get(ident,{})
+        addr     = req_node.get("address","")[:60]
+        dur      = try_int(req_node.get("duration"))
+        ws       = req_node.get("window_start","00:00")
+        we       = req_node.get("window_end","23:59")
+        info     = {"ident":ident,"address":addr,
+                    "extra":f"load={un.get('load',0):.1f} | dur={dur} | {ws}–{we}"}
+        _, key, _, sev, title, why, action = get_node_primary_cause(ident, req_node, un, pf_issues_so_far, ctx)
+        g = grouped[key]
+        g["items"].append(info)
+        g["sev"]    = sev
+        g["title"]  = title
+        g["why"]    = why
+        g["action"] = action
+
+    for key, g in grouped.items():
+        issues.append(Issue(
+            code     = key.upper().replace("PF_",""),
+            scope    = "unattended",
+            severity = g["sev"],
+            title    = f"{g['title']} — {len(g['items'])} nodo(s)",
+            why      = g["why"],
+            action   = g["action"],
+            affected = g["items"],
+        ))
+
+    # ─── 4. FLEET — solo si no están ya explicados por pre-vuelo ────────────
+    pf_codes = {i.code for i in issues if i.scope == "preflight"}
     active_cnt   = {vid:cnt for vid,cnt in routed_per_veh.items() if cnt>0}
     idle_vehs    = [vid for vid,cnt in routed_per_veh.items() if cnt==0]
     visits_list  = list(active_cnt.values())
     single_ratio = sum(1 for v in visits_list if v==1)/max(len(visits_list),1) if visits_list else 0
 
-    if single_ratio > 0.8 and visits_list:
+    # FLEET_SINGLE_VISIT: solo si no hay causa sistémica que lo explique
+    systemic_causes = {"MIN_LOAD_IMPOSSIBLE","W02102","E03004","NODES_NO_ZONE","E03005"}
+    if single_ratio > 0.8 and visits_list and not (pf_codes & systemic_causes):
         issues.append(Issue("FLEET_SINGLE_VISIT","fleet","high",
             f"{int(single_ratio*100)}% de los vehículos activos hicieron exactamente 1 visita",
             "Cada vehículo completa una visita y no puede encadenar más. Las ventanas pueden ser demasiado estrechas o el punto de inicio está lejos.",
             "Ampliar las ventanas de tiempo o revisar las ubicaciones de inicio de los vehículos."))
-    if len(idle_vehs) > len(routed_per_veh)*0.2:
+
+    # FLEET_IDLE: solo si no está ya explicado por pre-vuelo
+    if idle_vehs and len(idle_vehs) > len(routed_per_veh)*0.2 and not (pf_codes & systemic_causes):
         issues.append(Issue("FLEET_IDLE","fleet","high",
             f"{len(idle_vehs)} vehículo(s) ({len(idle_vehs)*100//max(len(routed_per_veh),1)}%) sin ninguna visita asignada",
             "Estos vehículos no participaron en ninguna ruta. Puede ser por zonas incompatibles, min_load imposible o turno incompatible.",
