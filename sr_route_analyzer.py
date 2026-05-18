@@ -261,7 +261,7 @@ def build_explained_map(preflight_issues: List[Issue], nodes: list, all_veh_skil
     return explained
 
 
-
+def collect_all_issues(req: dict, res: dict) -> List[Issue]:
     issues: List[Issue] = []
     nodes    = req.get("nodes", [])
     vehicles = req.get("vehicles", [])
